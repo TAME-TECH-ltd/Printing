@@ -23,7 +23,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@prisma/client": "^5.17.0",
+    "@prisma/client": "^6.16.2",
     "node-thermal-printer": "^4.4.2"
   },
   "devDependencies": {
@@ -31,8 +31,9 @@
     "electron-packager": "^17.1.2",
     "electron-winstaller": "^5.3.1",
     "nodemon": "^3.1.3",
-    "prisma": "^5.17.0",
+    "prisma": "^6.16.2",
     "request": "^2.88.2",
     "rimraf": "^6.0.1"
-  }
+  },
+  "packageManager": "yarn@4.9.0+sha512.5f5f00843eae735dfab6f0442524603e987ceca55e98b36eb0120f4e58908e5b1406545321e46627dca97d15d562f23dc13fb96cabd4e6bc92d379f619001e4e"
 }

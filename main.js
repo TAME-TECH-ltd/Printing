@@ -210,7 +210,7 @@ ipcMain.handle("print-content", async (event, data) => {
     options.interface = `//localhost/${data.port}`;
   }
   const printer = new ThermalPrinter(options);
- 
+
   try {
     await printer.isPrinterConnected();
     printer.alignCenter();
@@ -224,8 +224,9 @@ ipcMain.handle("print-content", async (event, data) => {
     printer.println(`Email: ${data?.settings?.app_email}`);
     printer.println(`Address: ${data?.settings?.site_address}`);
     printer.drawLine();
-
     printer.alignLeft();
+
+    const isReceipt = data?.order?.ebm_meta || data?.round?.origin === "RETAIL";
     if (data?.round?.category === "ORDER") {
       printer.println(
         `Order #: ${helper.generateVoucherNo(data?.round?.round_no)}(${
@@ -234,7 +235,9 @@ ipcMain.handle("print-content", async (event, data) => {
       );
     } else if (data?.round?.category === "INVOICE") {
       printer.println(
-        `Invoice #: ${helper.generateVoucherNo(data?.order?.id)}`
+        `${isReceipt ? "RECEIPT" : "INVOICE"} #: ${helper.generateVoucherNo(
+          data?.order?.id
+        )}`
       );
     } else {
       // printer.print(`\x1B\x45\x01${data?.settings?.momo_code}\x1B\x45\x00`);
@@ -245,13 +248,15 @@ ipcMain.handle("print-content", async (event, data) => {
       );
     }
     printer.println(`Customer: ${data?.order?.client || "Walk-In"}`);
-    printer.tableCustom([
-      {
-        text: `Served By: ${data?.order?.waiter}`,
-        align: "LEFT",
-      },
-      { text: `Table No: ${data?.order?.table_name}`, align: "RIGHT" },
-    ]);
+    if (!isReceipt) {
+      printer.tableCustom([
+        {
+          text: `Served By: ${data?.order?.waiter}`,
+          align: "LEFT",
+        },
+        { text: `Table No: ${data?.order?.table_name}`, align: "RIGHT" },
+      ]);
+    }
 
     printer.tableCustom([
       {
@@ -339,7 +344,7 @@ ipcMain.handle("print-content", async (event, data) => {
             correction: "Q",
           }
         );
-        printer.println(`Powered by EBM v2`);
+        printer.println(`Powered by EBM v2.1`);
       } else {
         printer.alignRight();
         printer.setTextDoubleWidth();
