@@ -1,124 +1,336 @@
-const { createApp, ref, computed, onBeforeMount } = Vue;
-const generateFormData = (obj) => {
-  const formData = new FormData();
-  for (let key in obj) {
-    if (obj[key] !== null && typeof obj[key] !== "undefined") {
-      if (typeof obj[key] === "object")
-        formData.append(key, JSON.stringify(obj[key]));
-      else formData.append(key, obj[key]);
+const {
+  createApp,
+  ref,
+  computed,
+  onBeforeMount,
+  onMounted,
+  onUnmounted,
+  watch,
+} = Vue;
+
+// Utility functions
+const encodeQuery = (url, data) => {
+  let query = "";
+  for (let d in data) {
+    if (data[d] && url.indexOf(`?${d}`) < 0 && url.indexOf(`&${d}`) < 0)
+      query += encodeURIComponent(d) + "=" + encodeURIComponent(data[d]) + "&";
+  }
+  return url.indexOf("?") > -1
+    ? `${url}&${query.slice(0, -1)}`
+    : `${url}?${query.slice(0, -1)}`;
+};
+
+// Utility function: determines if we need to add 'bkend' for production
+function addBkendIfProduction(baseUrl, path) {
+  try {
+    const parsed = new URL(baseUrl);
+    // Match .localhost or localhost or 127.0.0.1
+    if (
+      parsed.hostname === "localhost" ||
+      parsed.hostname === "127.0.0.1" ||
+      parsed.hostname.endsWith(".localhost")
+    ) {
+      // local/dev – do not add bkend
+      return `${baseUrl}${path}`;
+    }
+  } catch {
+    // fallback: basic substring for broken/malformed URLs
+    if (baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1")) {
+      return `${baseUrl}${path}`;
     }
   }
-  return formData;
+  // for production, ensure path starts with /
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  let insertPath = cleanPath.startsWith("/bkend/")
+    ? cleanPath
+    : `/bkend${cleanPath}`;
+  return `${baseUrl}${insertPath}`;
+}
+
+// Constants
+const DISPLAY_MODES = {
+  PRINTERS_VIEW: "PRINTERS_VIEW",
+  FORM_VIEW: "FORM_VIEW",
+};
+
+const PRINTER_TYPES = {
+  EPSON: "EPSON",
+};
+
+const PRINTER_INTERFACES = {
+  TCP: "TCP",
+};
+
+const CONTENT_TYPES = {
+  K: "Kitchen Orders",
+  B: "Bard Orders",
+  I: "Invoices",
+  KB: "Kitchen & Bar Orders",
+  BK: "Kitchen & Bar Orders",
+  KI: "Kitchen Orders & Invoices",
+  IK: "Kitchen Orders & Invoices",
+  BI: "BAR & Invoices",
+  IB: "BAR & Invoices",
+};
+
+// Composables for better state management
+const useApiClient = () => {
+  const isLoading = ref(false);
+  const isFetching = ref(false);
+
+  const setupInterceptors = () => {
+    const requestInterceptor = axios.interceptors.request.use(
+      (config) => {
+        isLoading.value = true;
+        return config;
+      },
+      (error) => {
+        isLoading.value = false;
+        return Promise.reject(error);
+      }
+    );
+
+    const responseInterceptor = axios.interceptors.response.use(
+      (response) => {
+        isLoading.value = false;
+        return response;
+      },
+      (error) => {
+        isLoading.value = false;
+        return Promise.reject(error);
+      }
+    );
+
+    return () => {
+      axios.interceptors.request.eject(requestInterceptor);
+      axios.interceptors.response.eject(responseInterceptor);
+    };
+  };
+
+  return {
+    isLoading,
+    isFetching,
+    setupInterceptors,
+  };
+};
+
+const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
+  const isFetching = ref(false);
+  const fetchInterval = ref(null);
+  const isActive = ref(false);
+
+  const startFetching = (meta = null) => {
+    if (!isActive.value) return;
+
+    const roundsUrl = url.value ? "next-printable-round" : null;
+    if (!roundsUrl || !activePrinters.value.length) return;
+
+    // Build URL with outlet code and correct bkend logic
+    let _url = url.value
+      ? outletCode.value
+        ? addBkendIfProduction(
+            url.value,
+            `/api/${roundsUrl}/${outletCode.value}`
+          )
+        : addBkendIfProduction(url.value, `/api/${roundsUrl}`)
+      : null;
+    if (meta) {
+      const filters = {};
+      if (meta.latest) filters.latest = meta.latest;
+      if (meta.content) filters.content = meta.content;
+      _url = encodeQuery(_url, filters);
+    }
+
+    isFetching.value = true;
+
+    axios
+      .get(_url)
+      .then((response) => {
+        const { status, round, order, items } = response.data;
+        if (status) {
+          const printer = activePrinters.value[0];
+          if (printer) {
+            const _content = JSON.parse(printer.content);
+            const data = {
+              printer: printer.name,
+              type: printer.type,
+              interface: printer.interface,
+              port: printer.port,
+              ip: printer.ip,
+              round: round,
+              items: items,
+              order: order,
+              settings: { ...appSettings.value },
+              content: _content.join(""),
+            };
+            window.electronAPI.invoke("print-content", data).catch((error) => {
+              console.error("Print error:", error);
+            });
+          }
+        } else {
+          if (round) {
+            axios.get(
+              `${url.value}/bkend/api/update-printed-round/${round.id}`
+            );
+          }
+          // Schedule next fetch
+          scheduleNextFetch(meta);
+        }
+      })
+      .catch(() => {
+        isFetching.value = false;
+        // Retry after error
+        scheduleNextFetch(meta, 3000);
+      })
+      .finally(() => {
+        isFetching.value = false;
+      });
+  };
+
+  const scheduleNextFetch = (meta = null, delay = 2000) => {
+    if (fetchInterval.value) {
+      clearTimeout(fetchInterval.value);
+    }
+    fetchInterval.value = setTimeout(() => {
+      if (isActive.value) {
+        startFetching(meta);
+      }
+    }, delay);
+  };
+
+  const stopFetching = () => {
+    isActive.value = false;
+    if (fetchInterval.value) {
+      clearTimeout(fetchInterval.value);
+      fetchInterval.value = null;
+    }
+  };
+
+  const resumeFetching = (meta = null) => {
+    isActive.value = true;
+    startFetching(meta);
+  };
+
+  return {
+    isFetching,
+    startFetching,
+    stopFetching,
+    resumeFetching,
+  };
+};
+
+const useFlashMessage = () => {
+  const hasFlashMessage = ref(false);
+  const message = ref(null);
+  const messageTimeout = ref(null);
+
+  const toggleFlashMessage = (msg) => {
+    // Clear existing timeout
+    if (messageTimeout.value) {
+      clearTimeout(messageTimeout.value);
+    }
+
+    hasFlashMessage.value = true;
+    message.value = msg;
+
+    messageTimeout.value = setTimeout(() => {
+      hasFlashMessage.value = false;
+      message.value = null;
+    }, 3000);
+  };
+
+  const clearMessage = () => {
+    if (messageTimeout.value) {
+      clearTimeout(messageTimeout.value);
+      messageTimeout.value = null;
+    }
+    hasFlashMessage.value = false;
+    message.value = null;
+  };
+
+  return {
+    hasFlashMessage,
+    message,
+    toggleFlashMessage,
+    clearMessage,
+  };
 };
 
 const App = {
   setup() {
-    const displayMode = ref("PRINTERS_VIEW"); // PRINTERS_VIEW or FORM_VIEW
+    // State management
+    const displayMode = ref(DISPLAY_MODES.PRINTERS_VIEW);
     const appSettings = ref({});
     const printers = ref([]);
     const activePrinters = ref([]);
-    const printerIpAddress = ref("");
-    const printerPort = ref("");
-    const printerType = ref("EPSON");
-    const printerInterface = ref("TCP");
+    const url = ref("");
+    const outletCode = ref(""); // New outlet code variable
+    const password = ref("");
+    const invalidPassword = ref(false);
+    const isAuthenticating = ref(false);
+    const isAuthenticated = ref(false);
+    const showApiConfig = ref(false);
+    const isSavingPrinter = ref(false);
+    const isDeletingPrinter = ref(false);
+    const systemInfo = ref(null);
+    const showSystemInfo = ref(false);
+
+    // Printer form state - keeping both old and new for compatibility
     const selectedPrinter = ref("");
     const selectedPrinterId = ref(null);
-    const branches = ref([]);
+    const printerIpAddress = ref("");
+    const printerPort = ref("");
+    const printerType = ref(PRINTER_TYPES.EPSON);
+    const printerInterface = ref(PRINTER_INTERFACES.TCP);
     const content = ref([]);
-    const url = ref("");
-    const branch = ref({});
-    const printInterval = ref(null);
-    const choosenBranchId = ref();
-    const authenticated = ref(false);
-    const isLoading = ref(false);
-    const password = ref("");
-    const invalidPasword = ref(false);
-    const isAuthenticating = ref(false);
-    const hasFlashMessage = ref(false);
-    const message = ref();
 
+    // New printer form state
+    const printerForm = ref({
+      ipAddress: "",
+      port: "",
+      type: PRINTER_TYPES.EPSON,
+      interface: PRINTER_INTERFACES.TCP,
+      name: "",
+      id: null,
+      content: [],
+    });
+
+    // Composables
+    const { isLoading, setupInterceptors } = useApiClient();
+    const { hasFlashMessage, message, toggleFlashMessage, clearMessage } =
+      useFlashMessage();
+    const { isFetching, startFetching, stopFetching, resumeFetching } =
+      useFetchingService(url, activePrinters, appSettings, outletCode);
+
+    // Computed properties
     const roundsUrl = computed(() => {
-      if (branch.value && url.value) {
-        const url = `next-printable-round?branch_id=${branch?.value?.id}`;
-        return url;
-      }
-      return null;
+      return url.value ? "next-printable-round" : null;
     });
 
-    const invoicesPrinter = computed(() => {
-      return activePrinters.value.find(
-        (printer) => JSON.parse(printer.content).indexOf("I") !== -1
-      );
-    });
-
-    const kitchenOrdersPrinter = computed(() => {
-      return activePrinters.value.find(
-        (printer) => JSON.parse(printer.content).indexOf("K") !== -1
-      );
-    });
-
-    const bardOrdersPrinter = computed(() => {
-      return activePrinters.value.find(
-        (printer) => JSON.parse(printer.content).indexOf("B") !== -1
-      );
-    });
-
-    onBeforeMount(() => {
-      axios.interceptors.request.use(
-        (config) => {
-          isLoading.value = true;
-          return config;
-        },
-        (error) => {
-          isLoading.value = false;
-          return Promise.reject(error);
-        }
-      );
-
-      axios.interceptors.response.use(
-        (response) => {
-          isLoading.value = false;
-          return response;
-        },
-        (error) => {
-          isLoading.value = false;
-          return Promise.reject(error);
-        }
-      );
-
-      window.ipcRenderer.on("authResponse", (event, response) => {
-        authenticated.value = response;
-        if (response) {
-          window.ipcRenderer.send("authenticated");
-          toggleFlashMessage({
-            type: "success",
-            text: "Authenticated successfully",
-          });
-        } else {
-          toggleFlashMessage({
-            type: "danger",
-            text: "Invalid Password. Try again",
-          });
-          invalidPasword.value = true;
-        }
-      });
-
-      window.ipcRenderer.on("printersList", (event, _printers) => {
+    // Event handlers
+    const eventHandlers = {
+      printersList: (_printers) => {
         printers.value = _printers;
-      });
+      },
 
-      window.ipcRenderer.on("printedContent", (event, id) => {
-        axios.get(`${url.value}/api/pos/update-printed-round/${id}`);
-      });
+      printedContent: (meta) => {
+        setTimeout(() => resumeFetching(meta), 3000);
+      },
 
-      window.ipcRenderer.on("recordSaved", (event, data) => {
-        clearInterval(printInterval.value);
+      retryPrinting: (data) => {
+        window.electronAPI.invoke("print-content", data).catch((error) => {
+          console.error("Print retry failed:", error);
+        });
+      },
+
+      recordSaved: (data) => {
         const { type, result } = data;
         switch (type) {
           case "printer":
-            if (selectedPrinterId.value) {
+            if (selectedPrinterId.value || printerForm.value.id) {
+              const printerId = selectedPrinterId.value || printerForm.value.id;
               const index = activePrinters.value.findIndex(
-                (printer) => printer.id == selectedPrinterId.value
+                (printer) => printer.id == printerId
               );
               if (index !== -1) {
                 activePrinters.value[index] = result;
@@ -126,16 +338,10 @@ const App = {
             } else {
               activePrinters.value.push(result);
             }
-            displayMode.value = "PRINTERS_VIEW";
+            displayMode.value = DISPLAY_MODES.PRINTERS_VIEW;
             resetForm();
             break;
-          case "settings":
-            branch.value = {
-              id: result.branch_id,
-              name: result.branch_name,
-            };
-            break;
-          case "delete-printer":
+          case "printer-deleted":
             const index = activePrinters.value.findIndex(
               (printer) => printer.id == result
             );
@@ -148,125 +354,158 @@ const App = {
         }
         toggleFlashMessage({
           type: "success",
-          text: "Record saved successfully",
+          text: "Database updated successfully",
         });
-        fetchInvoices();
-      });
+        resumeFetching();
+      },
 
-      window.ipcRenderer.on("availableSettings", (event, data) => {
+      availableSettings: (data) => {
         const { settings, printers } = data;
-        console.log("printers", printers);
         activePrinters.value = printers;
         if (settings && Object.keys(settings).length > 0) {
           url.value = settings.base_url;
-          choosenBranchId.value = settings.branch_id;
-          branch.value = {
-            id: settings.branch_id,
-            name: settings.branch_name,
-          };
+          outletCode.value = settings.outlet_code || "";
           axios
-            .post(settings.base_url + "/api/pos/frontend/preloaders", {})
+            .get(
+              addBkendIfProduction(
+                settings.base_url,
+                outletCode.value
+                  ? `/api/frontend/preloaders/${outletCode.value}`
+                  : "/api/frontend/preloaders"
+              )
+            )
             .then((response) => {
-              appSettings.value = response?.data?.result;
+              appSettings.value = response?.data?.company;
               if (activePrinters.value.length) {
-                fetchInvoices();
+                resumeFetching();
               }
+            })
+            .catch((error) => {
+              console.error("Failed to load settings:", error);
+              toggleFlashMessage({
+                type: "error",
+                text: "Failed to load application settings",
+              });
             });
         }
+      },
+
+      "print-error": (errorInfo) => {
+        console.error("Print error:", errorInfo);
+        toggleFlashMessage({
+          type: "error",
+          text: `Printing failed: ${errorInfo.message}. Check system compatibility.`,
+        });
+      },
+    };
+
+    // Setup event listeners
+    const setupEventListeners = () => {
+      Object.entries(eventHandlers).forEach(([event, handler]) => {
+        window.electronAPI.on(event, handler);
       });
+    };
+
+    // Cleanup event listeners
+    const cleanupEventListeners = () => {
+      Object.keys(eventHandlers).forEach((event) => {
+        window.electronAPI.removeAllListeners(event);
+      });
+    };
+
+    onBeforeMount(() => {
+      setupInterceptors();
+      setupEventListeners();
     });
 
-    function getBranches() {
-      axios.get(url.value + "/api/pos/pos-branches").then((response) => {
-        branches.value = response.data.branches;
-      });
-    }
+    onMounted(() => {
+      isAuthenticated.value = false; // Always skip login for now
+      console.log(
+        "Tame Print Agent loaded. Login skipped for development mode."
+      );
+      window.electronAPI.send("authenticated");
 
-    function fetchInvoices() {
-      if (roundsUrl.value && activePrinters.value.length) {
-        printInterval.value = setInterval(() => {
-          axios
-            .get(url.value + "/api/pos/" + roundsUrl.value)
-            .then((response) => {
-              const { status, round, order, items } = response.data;
-              if (status) {
-                let printer;
-                if (round.destination === "KITCHEN") {
-                  printer = kitchenOrdersPrinter.value;
-                } else if (round.destination === "BAR") {
-                  printer = bardOrdersPrinter.value;
-                } else {
-                  printer = invoicesPrinter.value;
-                }
-                if (printer) {
-                  const data = {
-                    printer: printer.name,
-                    type: printer.type,
-                    interface: printer.interface,
-                    port: printer.port,
-                    ip: printer.ip,
-                    round: round,
-                    items: items,
-                    order: order,
-                    settings: { ...appSettings.value },
-                  };
+      // Load system information
+      loadSystemInfo();
+    });
 
-                  window.ipcRenderer.invoke("print-content", data).then(() => {
-                    console.log("Print request sent");
-                  });
-                }
-              } else {
-                if (round) {
-                  axios.get(
-                    `${url.value}/api/pos/update-printed-round/${round.id}`
-                  );
-                }
-              }
-            });
-        }, 6000);
+    onUnmounted(() => {
+      // Cleanup all resources
+      stopFetching();
+      cleanupEventListeners();
+      clearMessage();
+    });
+
+    // Business logic functions
+    const loadSystemInfo = async () => {
+      try {
+        const response = await window.electronAPI.invoke("get-system-info");
+        if (response.success) {
+          systemInfo.value = response.systemInfo;
+          console.log("System Info:", response.systemInfo);
+          console.log("Recommendations:", response.recommendations);
+        }
+      } catch (error) {
+        console.error("Failed to load system info:", error);
       }
-    }
+    };
 
-    function resetForm() {
+    const resetForm = () => {
+      // Reset old variables
       selectedPrinterId.value = null;
       selectedPrinter.value = "";
       printerIpAddress.value = "";
       printerPort.value = "";
-      printerType.value = "EPSON";
-      printerInterface.value = "TCP";
-    }
+      printerType.value = PRINTER_TYPES.EPSON;
+      printerInterface.value = PRINTER_INTERFACES.TCP;
+      content.value = [];
 
-    function setPrinter() {
-      const printer = {
-        name: selectedPrinter.value,
-        type: printerType.value,
-        ip: printerIpAddress.value,
-        port: printerPort.value,
-        interface: printerInterface.value,
-        content: JSON.stringify(content.value),
+      // Reset new form object
+      printerForm.value = {
+        ipAddress: "",
+        port: "",
+        type: PRINTER_TYPES.EPSON,
+        interface: PRINTER_INTERFACES.TCP,
+        name: "",
+        id: null,
+        content: [],
       };
-      if (selectedPrinterId.value) {
-        printer.id = selectedPrinterId.value;
-      }
-      window.ipcRenderer.invoke("add-printer", printer);
-    }
+    };
 
-    function updateSettings() {
-      const row = branches.value.find(
-        (_branch) => _branch.id == choosenBranchId.value
-      );
-      if (row) {
-        const settings = {
-          branch_name: row.name,
-          base_url: url.value,
-          branch_id: row.id,
-        };
-        window.ipcRenderer.invoke("save-settings", settings);
+    const setPrinter = () => {
+      isSavingPrinter.value = true;
+      const printer = {
+        url: url.value,
+        outlet_code: outletCode.value || null, // pass to backend
+        name: selectedPrinter.value || printerForm.value.name,
+        type: printerType.value || printerForm.value.type,
+        ip: printerIpAddress.value || printerForm.value.ipAddress,
+        port: printerPort.value || printerForm.value.port,
+        interface: printerInterface.value || printerForm.value.interface,
+        content: JSON.stringify(
+          content.value.length ? content.value : printerForm.value.content
+        ),
+      };
+      if (selectedPrinterId.value || printerForm.value.id) {
+        printer.id = selectedPrinterId.value || printerForm.value.id;
       }
-    }
+      window.electronAPI
+        .invoke("add-printer", printer)
+        .catch((error) => {
+          console.error("Failed to save printer:", error);
+          toggleFlashMessage({
+            type: "error",
+            text: "Failed to save printer configuration",
+          });
+        })
+        .finally(() => {
+          isSavingPrinter.value = false;
+        });
+    };
 
-    function showPrinterForm(printer = null) {
+    const showPrinterForm = (printer = null) => {
       if (printer) {
+        // Update old variables for template compatibility
         selectedPrinterId.value = printer.id;
         selectedPrinter.value = printer.name;
         printerType.value = printer.type;
@@ -274,111 +513,242 @@ const App = {
         printerPort.value = printer.port;
         printerInterface.value = printer.interface;
         content.value = JSON.parse(printer.content);
+
+        // Update new form object
+        printerForm.value = {
+          id: printer.id,
+          name: printer.name,
+          type: printer.type,
+          ipAddress: printer.ip,
+          port: printer.port,
+          interface: printer.interface,
+          content: JSON.parse(printer.content),
+        };
+      } else {
+        resetForm();
       }
-      displayMode.value = "FORM_VIEW";
-    }
+      displayMode.value = DISPLAY_MODES.FORM_VIEW;
+    };
 
-    function handleCancel() {
+    const handleCancel = () => {
       resetForm();
-      displayMode.value = "PRINTERS_VIEW";
-    }
+      displayMode.value = DISPLAY_MODES.PRINTERS_VIEW;
+    };
 
-    function deletePrinter(printer) {
+    const deletePrinter = (printer) => {
       if (
         confirm(`Are you sure you want to remove printer ${printer?.name}?`)
       ) {
-        window.ipcRenderer.invoke("delete-printer", printer.id);
+        isDeletingPrinter.value = true;
+        window.electronAPI
+          .invoke("delete-printer", printer.id)
+          .catch((error) => {
+            console.error("Failed to delete printer:", error);
+            toggleFlashMessage({
+              type: "error",
+              text: "Failed to delete printer",
+            });
+          })
+          .finally(() => {
+            isDeletingPrinter.value = false;
+          });
       }
-    }
+    };
 
-    function handleLogin() {
-      invalidPasword.value = false;
+    const handleLogin = () => {
+      if (!password.value) {
+        toggleFlashMessage({
+          type: "warning",
+          text: "Please enter a password",
+        });
+        return;
+      }
+
       isAuthenticating.value = true;
-      window.ipcRenderer.invoke("login-action", password.value).then(() => {
-        isAuthenticating.value = false;
-      });
-    }
+      invalidPassword.value = false;
 
-    function showPrinterContent(content) {
+      window.electronAPI
+        .invoke("login-action", password.value)
+        .then((response) => {
+          if (response && response.success) {
+            isAuthenticated.value = true;
+            password.value = "";
+            toggleFlashMessage({
+              type: "success",
+              text: "Login successful!",
+            });
+            window.electronAPI.send("authenticated");
+          } else {
+            toggleFlashMessage({
+              type: "error",
+              text: response?.message || "Invalid password. Please try again.",
+            });
+          }
+        })
+        .catch((error) => {
+          console.error("Login error:", error);
+          toggleFlashMessage({
+            type: "error",
+            text: "Login failed. Please try again.",
+          });
+        })
+        .finally(() => {
+          isAuthenticating.value = false;
+        });
+    };
+
+    const handleLogout = () => {
+      isAuthenticated.value = false;
+      password.value = "";
+      invalidPassword.value = false;
+      toggleFlashMessage({
+        type: "info",
+        text: "You have been logged out successfully.",
+      });
+    };
+
+    const toggleApiConfig = () => {
+      showApiConfig.value = !showApiConfig.value;
+    };
+
+    const testConnection = () => {
+      if (!url.value) {
+        toggleFlashMessage({
+          type: "warning",
+          text: "Please enter a URL first",
+        });
+        return;
+      }
+
+      axios
+        .get(
+          addBkendIfProduction(
+            url.value,
+            outletCode.value
+              ? `/api/frontend/preloaders/${outletCode.value}`
+              : "/api/frontend/preloaders"
+          )
+        )
+        .then((response) => {
+          if (response.data && response.data.company) {
+            toggleFlashMessage({
+              type: "success",
+              text: "Connection successful! API endpoint is working.",
+            });
+            appSettings.value = response.data.company;
+          } else {
+            toggleFlashMessage({
+              type: "warning",
+              text: "Connection successful but no company data found.",
+            });
+          }
+        })
+        .catch((error) => {
+          console.error("Connection test failed:", error);
+          toggleFlashMessage({
+            type: "error",
+            text: `Connection failed: ${error.message || "Unknown error"}`,
+          });
+        });
+    };
+
+    const showPrinterContent = (content) => {
       const abbr = JSON.parse(content).join("");
       const len = String(abbr).length;
-      let result;
+
       if (len === 1) {
-        switch (abbr) {
-          case "K":
-            result = "Kitchen Orders";
-            break;
-          case "B":
-            result = "Bard Orders";
-            break;
-          case "I":
-            result = "Invoices";
-            break;
-          default:
-            break;
-        }
+        return CONTENT_TYPES[abbr] || "Unknown";
       } else if (len === 2) {
-        if (abbr === "KB" || abbr === "BK") {
-          result = "Kitchen & Bar Orders";
-        } else if (abbr === "KI" || abbr === "IK") {
-          result = "Kitchen Orders & Invoices";
-        } else if (abbr === "BI" || abbr === "IB") {
-          result = "BAR & Invoices";
-        }
+        return CONTENT_TYPES[abbr] || "Unknown";
       } else {
-        result = "All Orders and Invoices";
+        return "All Orders and Invoices";
       }
+    };
 
-      return result;
-    }
+    const toggleSystemInfo = () => {
+      showSystemInfo.value = !showSystemInfo.value;
+    };
 
-    function toggleFlashMessage(msg) {
-      hasFlashMessage.value = !hasFlashMessage.value;
-      message.value = msg;
-      setTimeout(() => (hasFlashMessage.value = !hasFlashMessage.value), 3000);
-    }
+    const buildUrlWithOutlet = (base, path) => {
+      if (outletCode.value) {
+        // insert outletCode as a segment after path
+        path = path.endsWith("/") ? path.slice(0, -1) : path;
+        return `${base}${path}/${outletCode.value}`;
+      }
+      return `${base}${path}`;
+    };
 
     return {
-      isAuthenticating,
-      authenticated,
+      // State
+      displayMode,
       appSettings,
       printers,
-      selectedPrinter,
-      branches,
-      content,
+      activePrinters,
       url,
-      branch,
-      printInterval,
-      choosenBranchId,
-      roundsUrl,
+      password,
+      invalidPassword,
+      isAuthenticating,
+      isAuthenticated,
+      showApiConfig,
+      isSavingPrinter,
+      isDeletingPrinter,
+      systemInfo,
+      showSystemInfo,
+      outletCode, // expose for template
+
+      // Old printer form variables (for template compatibility)
+      selectedPrinter,
+      selectedPrinterId,
       printerIpAddress,
+      printerPort,
       printerType,
       printerInterface,
-      printerPort,
-      displayMode,
-      selectedPrinterId,
-      invoicesPrinter,
-      kitchenOrdersPrinter,
-      bardOrdersPrinter,
-      fetchInvoices,
-      getBranches,
-      invalidPasword,
+      content,
+
+      // New printer form object
+      printerForm,
+
+      // Computed
+      roundsUrl,
+
+      // Loading states
+      isLoading,
+      isFetching,
+
+      // Flash messages
       hasFlashMessage,
-      toggleFlashMessage,
       message,
-      password,
+
+      // Constants
+      DISPLAY_MODES,
+      PRINTER_TYPES,
+      PRINTER_INTERFACES,
+
+      // Methods
       resetForm,
       setPrinter,
-      activePrinters,
-      updateSettings,
       showPrinterForm,
-      deletePrinter,
       showPrinterContent,
       handleCancel,
+      deletePrinter,
       handleLogin,
-      isLoading,
+      handleLogout,
+      testConnection,
+      toggleApiConfig,
+      toggleSystemInfo,
+      loadSystemInfo,
+      startFetching,
+      stopFetching,
+      resumeFetching,
+      toggleFlashMessage,
+      buildUrlWithOutlet, // expose helper
     };
   },
 };
+
+// --- Force light mode (never dark) ---
+(function () {
+  document.body.classList.remove("dark-mode");
+})();
 
 createApp(App).mount("#app");

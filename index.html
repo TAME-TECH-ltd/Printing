@@ -3,90 +3,115 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Printing Service</title>
-    <link rel="stylesheet" href="assets/css/custom.min.css?ver=1.0.4" />
-    <style>
-      .printer-container {
-        position: relative;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        width: 50px;
-        height: 50px;
-      }
-      .printer-icon {
-        width: 40px;
-        height: 40px;
-        color: #333;
-      }
-
-      .printing-indicator {
-        position: absolute;
-        bottom: 10px;
-        right: 10px;
-        width: 10px;
-        height: 10px;
-        background-color: green;
-        border-radius: 50%;
-        animation: vibrate 0.3s linear infinite;
-      }
-
-      @keyframes vibrate {
-        0% {
-          transform: translate(0, 0);
-        }
-        25% {
-          transform: translate(1px, -1px);
-        }
-        50% {
-          transform: translate(0, 1px);
-        }
-        75% {
-          transform: translate(-1px, -1px);
-        }
-        100% {
-          transform: translate(0, 0);
-        }
-      }
-    </style>
+    <title>Tame Print Agent</title>
+    <link rel="stylesheet" href="assets/css/custom.css?ver=1.0.4" />
     <script src="assets/js/vue.global.js"></script>
+    <script src="assets/js/axios.min.js"></script>
   </head>
   <body>
     <div id="app">
-      <div
-        style="
-          z-index: 1060;
-          position: fixed;
-          top: 0;
-          width: 100%;
-          text-align: center;
-        "
-        v-if="isLoading"
-      >
-        <div class="loading text-center">
-          <div class="load-circle1"></div>
-          <div class="load-circle2"></div>
-          <div class="load-circle3"></div>
-          <div class="load-circle4"></div>
-          <div class="load-circle5"></div>
+      <!-- Non-blocking Loading Indicator -->
+      <div v-if="isLoading" class="loading-indicator">
+        <div class="loading-dot"></div>
+        <span class="loading-text">Loading...</span>
+      </div>
+
+      <!-- Login Form (Skipped for Development) -->
+      <div v-if="!isAuthenticated" class="login-container">
+        <div class="login-box">
+          <div class="login-header">
+            <div class="login-logo">
+              <svg viewBox="0 0 24 24" fill="none" class="logo-icon">
+                <path
+                  d="M6 9V2H18V9"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M6 18H4C3.44772 18 3 17.5523 3 17V11C3 10.4477 3.44772 10 4 10H20C20.5523 10 21 10.4477 21 11V17C21 17.5523 20.5523 18 20 18H18"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M18 14H6V22H18V14Z"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </div>
+            <h2>Tame Print Agent</h2>
+          </div>
+          <form @submit.prevent="handleLogin" class="login-form">
+            <div class="form-group">
+              <label for="password">Password</label>
+              <input
+                type="password"
+                id="password"
+                v-model="password"
+                class="form-control"
+                placeholder="Enter password"
+                required
+                :disabled="isAuthenticating"
+              />
+            </div>
+            <div class="form-group">
+              <button
+                type="submit"
+                class="btn btn-primary btn-block"
+                :disabled="isAuthenticating || !password"
+              >
+                <span v-if="isAuthenticating">Authenticating...</span>
+                <span v-else>Login</span>
+              </button>
+            </div>
+          </form>
         </div>
       </div>
-      <transition name="bounce">
-        <div
-          v-if="hasFlashMessage"
-          id="ember201"
-          class="notification-message text-center zf-notification-container ember-view"
-          style="
-            transform: translateY(0px);
-            opacity: 1;
-            transition: transform 0.6s ease 0s;
-          "
-        >
-          <div align="center">
+
+      <!-- Main Application -->
+      <div class="main-app" :class="{ authenticated: isAuthenticated }">
+        <!-- Header -->
+        <div class="header">
+          <div class="breadcrumb">
+            <span class="breadcrumb-item">Tame Print Agent</span>
+            <span class="breadcrumb-separator">></span>
+            <span class="breadcrumb-item current">Printer Management</span>
+          </div>
+          <div class="header-content">
+            <h1 class="page-title">Printer Management</h1>
+            <button
+              @click="handleLogout"
+              class="btn btn-outline-secondary btn-sm logout-btn"
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                <polyline points="16,17 21,12 16,7"></polyline>
+                <line x1="21" y1="12" x2="9" y2="12"></line>
+              </svg>
+              Logout
+            </button>
+          </div>
+        </div>
+
+        <!-- Flash Messages -->
+        <transition name="bounce">
+          <div v-if="hasFlashMessage" class="notification-message">
             <div :class="`message-container ${message?.type}`">
-              <div>
+              <div class="message-icon">
                 <svg
-                  class="svg-icon"
                   v-if="message?.type == 'warning'"
                   viewBox="0 0 17 16"
                   xmlns="http://www.w3.org/2000/svg"
@@ -97,10 +122,8 @@
                     d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5a.905.905 0 0 0-.9.995l.35 3.507a.552.552 0 0 0 1.1 0l.35-3.507A.905.905 0 0 0 8 5zm.002 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"
                   ></path>
                 </svg>
-
                 <svg
                   v-if="message?.type == 'info'"
-                  class="svg-icon"
                   viewBox="0 0 16 16"
                   xmlns="http://www.w3.org/2000/svg"
                   fill="currentColor"
@@ -112,7 +135,6 @@
                 </svg>
                 <svg
                   v-if="message?.type == 'success'"
-                  class="svg-icon"
                   viewBox="0 0 16 16"
                   xmlns="http://www.w3.org/2000/svg"
                   fill="currentColor"
@@ -122,9 +144,7 @@
                     d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"
                   ></path>
                 </svg>
-
                 <svg
-                  class="svg-icon"
                   v-if="message?.type == 'danger'"
                   viewBox="0 0 16 16"
                   xmlns="http://www.w3.org/2000/svg"
@@ -139,415 +159,468 @@
               <div class="msg">
                 <span>{{ message?.text }}</span>
               </div>
-              <div @click="toggleFlashMessage(null)">
-                <svg
-                  version="1.1"
-                  id="Layer_1"
-                  xmlns="http://www.w3.org/2000/svg"
-                  x="0"
-                  y="0"
-                  viewBox="0 0 512 512"
-                  xml:space="preserve"
-                  class="icon-remove"
-                >
+              <div @click="toggleFlashMessage(null)" class="close-message">
+                <svg viewBox="0 0 24 24" fill="none">
                   <path
-                    d="M455.2 9.2L256 208.4 56.8 9.2C44.5-3.1 24.6-3.1 12.2 9.2l-2.9 2.9C-3 24.4-3 44.4 9.3 56.7L208.4 256 9.2 455.2c-12.3 12.3-12.3 32.3 0 44.6l2.9 2.9c12.3 12.3 32.3 12.3 44.6 0L256 303.6l199.2 199.2c12.3 12.3 32.3 12.3 44.6 0l2.9-2.9c12.3-12.3 12.3-32.3 0-44.6L303.6 256 502.8 56.8c12.3-12.3 12.3-32.3 0-44.6l-2.9-2.9c-12.5-12.4-32.4-12.4-44.7-.1z"
-                  ></path>
+                    d="M18 6L6 18M6 6L18 18"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
                 </svg>
               </div>
             </div>
           </div>
-        </div>
-      </transition>
-      <div
-        class="container-fluid"
-        style="margin-top: 0.5rem"
-        v-if="authenticated"
-      >
-        <div class="row mb-2">
-          <div class="col-12">
-            <h4 class="mb-0">Configure Printers for invoices and Orders</h4>
-            <hr />
-          </div>
-          <div class="col-5">
-            <div class="form-group">
-              <label>URL:</label>
-              <input
-                type="text"
-                class="form-control"
-                placeholder="Eg: https://demo.tameaps.com/"
-                v-model="url"
-              />
-            </div>
-          </div>
-          <div class="col-4">
-            <div class="form-group" v-if="!choosenBranchId && !branches.length">
-              <label style="visibility: hidden; width: 100%">Button</label>
-              <button
-                type="button"
-                class="btn btn-primary"
-                @click="getBranches()"
-                :disabled="!url"
-              >
-                Get Branches {{ choosenBranchId }}
-              </button>
-            </div>
-            <div class="align-items-center" v-else-if="branches.length">
-              <div class="form-group">
-                <label>Branch:</label>
-                <select
-                  class="form-control form-select"
-                  v-model="choosenBranchId"
-                >
-                  <option value="null" hidden disabled>Select Branch</option>
-                  <option
-                    :value="branch.id"
-                    v-for="branch in branches"
-                    :key="branch.id"
-                  >
-                    {{ branch.name }}
-                  </option>
-                </select>
-              </div>
-            </div>
-            <div class="" v-else>
-              <label>Branch:</label>
-              <input
-                type="text"
-                :value="branch?.name"
-                class="form-control"
-                readonly
-              />
-            </div>
-          </div>
-          <div class="col-3">
-            <label style="visibility: hidden; width: 100%">Button</label>
-            <button
-              type="button"
-              class="btn btn-primary w-100"
-              @click="updateSettings"
-              :disabled="!url || !choosenBranchId"
-            >
-              Save Settings
+        </transition>
+
+        <!-- URL Configuration Section -->
+        <div class="url-section" :class="{ collapsed: !showApiConfig }">
+          <div class="section-header" @click="toggleApiConfig">
+            <h2 class="section-title">API Configuration</h2>
+            <button class="toggle-btn" :class="{ expanded: showApiConfig }">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M6 9L12 15L18 9"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
             </button>
           </div>
-        </div>
-        <hr />
-        <div class="row mb-2">
-          <div class="col-12" v-if="displayMode === 'PRINTERS_VIEW'">
-            <div class="w-100 d-flex align-items-center">
-              <h4 class="mb-0">Available Printers</h4>
-              <button
-                class="btn btn-success"
-                style="margin-left: auto"
-                type="button"
-                @click="showPrinterForm()"
-                v-if="activePrinters.length"
-              >
-                Add New
-              </button>
-            </div>
-          </div>
-          <div class="col-12 pt-3" v-if="displayMode !== 'PRINTERS_VIEW'">
-            <h4>Add Printer</h4>
-            <div class="form-group row mb-2 align-items-center">
-              <label class="col-3">Printer Name:</label>
-              <div class="col-4">
-                <select
-                  class="form-control form-select"
-                  v-model="selectedPrinter"
-                >
-                  <option value="null" hidden disabled>Select Printer</option>
-                  <option
-                    :value="printer.name"
-                    v-for="printer in printers"
-                    :key="printer.name"
+          <div class="section-content" v-show="showApiConfig">
+            <div class="url-form">
+              <div class="form-group">
+                <label for="apiUrl">API Base URL</label>
+                <div class="url-input-group">
+                  <input
+                    type="text"
+                    id="apiUrl"
+                    v-model="url"
+                    class="form-control"
+                    placeholder="https://demo.tameaps.com"
+                    required
+                  />
+                  <button
+                    type="button"
+                    class="btn btn-secondary"
+                    @click="testConnection"
+                    :disabled="!url"
                   >
-                    {{ printer.name }}
-                  </option>
-                </select>
-              </div>
-            </div>
-            <div class="form-group row mb-2 align-items-center">
-              <label class="col-3">Printer Type:</label>
-              <div class="col-4">
-                <select class="form-control form-select" v-model="printerType">
-                  <option value="EPSON">EPSON</option>
-                  <option value="STAR">STAR</option>
-                  <option value="BIXOLON">BIXOLON</option>
-                  <option value="CUSTOM">CUSTOM</option>
-                  <option value="ZEBRA">ZEBRA</option>
-                </select>
-              </div>
-            </div>
-            <div class="form-group row mb-2 align-items-center">
-              <label class="col-3">Interface:</label>
-              <div class="col-4">
-                <select
-                  class="form-control form-select"
-                  v-model="printerInterface"
-                >
-                  <option value="TCP">TCP</option>
-                  <option value="USB">USB</option>
-                </select>
-              </div>
-            </div>
-            <div
-              class="form-group row mb-2 align-items-center"
-              v-if="printerInterface === 'TCP'"
-            >
-              <label class="col-3">IP Address:</label>
-              <div class="col-4">
-                <input
-                  type="text"
-                  class="form-control"
-                  placeholder="xxx.xxx.xxx.xxx"
-                  v-model="printerIpAddress"
-                />
-              </div>
-            </div>
-            <div class="form-group row mb-2 align-items-center" v-else>
-              <label class="col-3">PORT:</label>
-              <div class="col-4">
-                <input
-                  type="text"
-                  class="form-control"
-                  placeholder="eg: COM1, COM2, etc. Or USB001"
-                  v-model="printerPort"
-                />
-              </div>
-            </div>
-
-            <div class="form-group row mb-2 align-items-center">
-              <label class="col-4">Printable Content:</label>
-              <div class="col-8">
-                <div
-                  style="
-                    display: grid;
-                    grid-template-columns: repeat(2, 1fr);
-                    grid-template-rows: repeat(2, 1fr);
-                    gap: 10px;
-                    width: 100%;
-                  "
-                >
-                  <div class="form-check" style="margin-right: 0.5rem">
-                    <input
-                      class="form-check-input form-check-input-primary"
-                      type="checkbox"
-                      value="K"
-                      v-model="content"
-                    />
-                    <label class="ms-2">Kitchen Orders</label>
-                  </div>
-                  <div class="form-check" style="margin-right: 0.5rem">
-                    <input
-                      class="form-check-input form-check-input-primary"
-                      type="checkbox"
-                      value="B"
-                      v-model="content"
-                    />
-                    <label class="ms-2">Bar Orders</label>
-                  </div>
-                  <div class="form-check" style="margin-right: 0.5rem">
-                    <input
-                      class="form-check-input form-check-input-primary"
-                      type="checkbox"
-                      value="I"
-                      v-model="content"
-                    />
-                    <label class="ms-2">Invoices</label>
-                  </div>
+                    Test Connection
+                  </button>
+                </div>
+                <small class="form-help">
+                  Enter the base URL for your invoice API endpoint
+                </small>
+                <div class="form-group" style="margin-top: 10px">
+                  <label for="outletCode">Outlet Code (optional)</label>
+                  <input
+                    type="text"
+                    id="outletCode"
+                    v-model="outletCode"
+                    class="form-control"
+                    placeholder="e.g. 875773664"
+                  />
+                  <small class="form-help"
+                    >If provided, will be added to all requests as a path
+                    segment just after the API endpoint (e.g.
+                    /endpoint/OUTLETCODE).</small
+                  >
                 </div>
               </div>
             </div>
+          </div>
+        </div>
 
+        <!-- Add Printer Section -->
+        <div class="add-section" v-show="displayMode === 'PRINTERS_VIEW'">
+          <button class="add-btn" @click="showPrinterForm()">
+            <svg class="add-icon" viewBox="0 0 24 24" fill="none">
+              <path
+                d="M12 5V19M5 12H19"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+            </svg>
+            Add Printer
+          </button>
+          <p class="add-description">
+            Add thermal printers, configure settings, and manage connections
+          </p>
+        </div>
+
+        <!-- Printers List -->
+        <div class="printers-section" v-show="displayMode === 'PRINTERS_VIEW'">
+          <h2 class="section-title">Configured Printers</h2>
+
+          <div v-if="!activePrinters.length" class="empty-state">
+            <div class="empty-icon">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M6 9V2H18V9"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M6 18H4C3.44772 18 3 17.5523 3 17V11C3 10.4477 3.44772 10 4 10H20C20.5523 10 21 10.4477 21 11V17C21 17.5523 20.5523 18 20 18H18"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M18 14H6V22H18V14Z"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </div>
+            <h3>No printers configured</h3>
+            <p>Add your first printer to get started with invoice printing</p>
+            <button class="btn btn-primary" @click="showPrinterForm()">
+              Add First Printer
+            </button>
+          </div>
+
+          <div v-else class="printer-list">
             <div
-              class="form-group row mb-2 align-items-center"
-              style="margin-top: 1rem"
+              v-for="printer in activePrinters"
+              :key="printer.id"
+              class="printer-item"
+              :class="{ active: isFetching }"
             >
-              <label class="col-3"></label>
-              <div class="col-9 d-flex">
+              <div class="printer-icon">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M6 9V2H18V9"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                  <path
+                    d="M6 18H4C3.44772 18 3 17.5523 3 17V11C3 10.4477 3.44772 10 4 10H20C20.5523 10 21 10.4477 21 11V17C21 17.5523 20.5523 18 20 18H18"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                  <path
+                    d="M18 14H6V22H18V14Z"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+                <div v-if="isFetching" class="printing-indicator"></div>
+              </div>
+
+              <div class="printer-info">
+                <div class="printer-name">{{ printer.name }}</div>
+                <div class="printer-details">
+                  <span class="printer-type">{{ printer.type }}</span>
+                  <span class="printer-interface">{{ printer.interface }}</span>
+                  <span v-if="printer.ip" class="printer-ip"
+                    >{{ printer.ip }}</span
+                  >
+                  <span v-else-if="printer.port" class="printer-port"
+                    >{{ printer.port }}</span
+                  >
+                </div>
+                <div class="printer-content">
+                  <span class="content-label">Content:</span>
+                  <span class="content-value"
+                    >{{ showPrinterContent(printer.content) }}</span
+                  >
+                </div>
+              </div>
+
+              <div class="printer-actions">
                 <button
-                  type="button"
-                  class="btn btn-primary"
-                  @click="setPrinter"
-                  :disabled="!content.length || !selectedPrinter"
+                  class="action-btn"
+                  @click="showPrinterForm(printer)"
+                  title="Edit Printer"
                 >
-                  Confirm Printer
+                  <svg viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M11 4H4C3.46957 4 2.96086 4.21071 2.58579 4.58579C2.21071 4.96086 2 5.46957 2 6V20C2 20.5304 2.21071 21.0391 2.58579 21.4142C2.96086 21.7893 3.46957 22 4 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V13"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                    <path
+                      d="M18.5 2.50023C18.8978 2.10243 19.4374 1.87891 20 1.87891C20.5626 1.87891 21.1022 2.10243 21.5 2.50023C21.8978 2.89804 22.1213 3.43762 22.1213 4.00023C22.1213 4.56284 21.8978 5.10243 21.5 5.50023L12 15.0002L8 16.0002L9 12.0002L18.5 2.50023Z"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </button>
+                <button
+                  class="action-btn danger"
+                  @click="deletePrinter(printer)"
+                  title="Delete Printer"
+                  :disabled="isDeletingPrinter"
+                >
+                  <div v-if="isDeletingPrinter" class="btn-loading-small"></div>
+                  <svg v-else viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M3 6H5H21"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    />
+                    <path
+                      d="M8 6V4C8 3.44772 8.44772 3 9 3H15C15.5523 3 16 3.44772 16 4V6M19 6V20C19 20.5523 18.5523 21 18 21H6C5.44772 21 5 20.5523 5 20V6H19Z"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Printer Form -->
+        <div v-if="displayMode === 'FORM_VIEW'" class="printer-form-section">
+          <div class="form-container">
+            <div class="form-header">
+              <h3>
+                {{ selectedPrinterId ? 'Edit Printer' : 'Add New Printer' }}
+              </h3>
+              <button class="close-btn" @click="handleCancel">×</button>
+            </div>
+
+            <form @submit.prevent="setPrinter" class="printer-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="printerName">Printer Name</label>
+                  <select
+                    id="printerName"
+                    v-model="selectedPrinter"
+                    class="form-control"
+                    required
+                  >
+                    <option value="">Select System Printer</option>
+                    <option
+                      v-for="printer in printers"
+                      :key="printer.name"
+                      :value="printer.name"
+                    >
+                      {{ printer.name }}
+                    </option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="printerType">Printer Type</label>
+                  <select
+                    id="printerType"
+                    v-model="printerType"
+                    class="form-control"
+                    required
+                  >
+                    <option value="EPSON">EPSON</option>
+                    <option value="STAR">STAR</option>
+                    <option value="CUSTOM">CUSTOM</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label for="printerInterface">Interface</label>
+                  <select
+                    id="printerInterface"
+                    v-model="printerInterface"
+                    class="form-control"
+                    required
+                  >
+                    <option value="TCP">TCP/IP</option>
+                    <option value="USB">USB</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div v-if="printerInterface === 'TCP'" class="form-group">
+                  <label for="printerIP">IP Address</label>
+                  <input
+                    type="text"
+                    id="printerIP"
+                    v-model="printerIpAddress"
+                    class="form-control"
+                    placeholder="192.168.1.100"
+                    required
+                  />
+                </div>
+                <div v-else class="form-group">
+                  <label for="printerPort">Share Name</label>
+                  <input
+                    type="text"
+                    id="printerPort"
+                    v-model="printerPort"
+                    class="form-control"
+                    placeholder="USB001"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="printerContent">Print Content</label>
+                  <div class="content-options">
+                    <label class="checkbox-label">
+                      <input type="checkbox" v-model="content" value="K" />
+                      <span class="checkmark"></span>
+                      Kitchen Orders
+                    </label>
+                    <label class="checkbox-label">
+                      <input type="checkbox" v-model="content" value="B" />
+                      <span class="checkmark"></span>
+                      Bar Orders
+                    </label>
+                    <label class="checkbox-label">
+                      <input type="checkbox" v-model="content" value="I" />
+                      <span class="checkmark"></span>
+                      Invoices
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div class="form-actions">
+                <button
+                  type="submit"
+                  class="btn btn-primary"
+                  :disabled="!url || !selectedPrinter || isSavingPrinter"
+                >
+                  <div v-if="isSavingPrinter" class="btn-loading"></div>
+                  <span v-if="isSavingPrinter">Saving...</span>
+                  <span v-else
+                    >{{ selectedPrinterId ? 'Update Printer' : 'Add Printer'
+                    }}</span
+                  >
                 </button>
                 <button
                   type="button"
-                  class="btn btn-danger"
+                  class="btn btn-secondary"
                   @click="handleCancel"
-                  style="margin-left: 20px"
+                  :disabled="isSavingPrinter"
                 >
                   Cancel
                 </button>
               </div>
-            </div>
+            </form>
           </div>
-          <div class="col-12 pt-3" style="text-align: center" v-else>
-            <div style="text-align: center" v-if="!activePrinters.length">
-              <h4>No Printers available</h4>
-              <button
-                type="button"
-                class="btn btn-primary"
-                @click="showPrinterForm()"
-              >
-                Add Printers
-              </button>
+        </div>
+
+        <!-- Status Section -->
+        <div class="status-section">
+          <h2 class="section-title">System Status</h2>
+          <div class="status-grid">
+            <div class="status-card">
+              <div class="status-icon">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M12 2L2 7L12 12L22 7L12 2Z"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                  <path
+                    d="M2 17L12 22L22 17"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                  <path
+                    d="M2 12L12 17L22 12"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </div>
+              <div class="status-info">
+                <h4>API Connection</h4>
+                <p>{{ url ? 'Connected' : 'Not configured' }}</p>
+              </div>
             </div>
-            <div
-              style="
-                display: grid;
-                grid-template-columns: repeat(2, 1fr);
-                gap: 10px;
-                width: 100%;
-              "
-              v-else
-            >
-              <div
-                class="panel mb-2"
-                v-for="printer in activePrinters"
-                :key="printer.id"
-              >
-                <div class="printer-container" v-if="printInterval">
-                  <svg
-                    class="printer-icon"
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                  >
-                    <path
-                      d="M19 7h-1V3H6v4H5C3.89 7 3 7.89 3 9v8h4v4h10v-4h4V9c0-1.11-.89-2-2-2zM8 4h8v3H8V4zm7 14H9v-4h6v4zm3-4h-1v-1H7v1H6v-5c0-.55.45-1 1-1h10c.55 0 1 .45 1 1v5z"
-                    />
-                  </svg>
-                  <div class="printing-indicator"></div>
-                </div>
-                <div
-                  style="
-                    display: flex;
-                    align-items: center;
-                    margin-bottom: 0.125rem;
-                  "
-                >
-                  <h4>Name: <small>{{ printer.name }}</small></h4>
-                </div>
-                <div
-                  style="
-                    display: flex;
-                    align-items: center;
-                    margin-bottom: 0.125rem;
-                  "
-                >
-                  <h4>Type: <small>{{ printer.type }}</small></h4>
-                </div>
-                <div
-                  style="
-                    display: flex;
-                    align-items: center;
-                    margin-bottom: 0.125rem;
-                  "
-                >
-                  <h4>Interface: <small>{{ printer.interface }}</small></h4>
-                </div>
-                <div
-                  v-if="printer.ip"
-                  style="
-                    display: flex;
-                    align-items: center;
-                    margin-bottom: 0.125rem;
-                  "
-                >
-                  <h4>IP address: <small>{{ printer.ip }}</small></h4>
-                </div>
-                <div
-                  v-if="printer.port"
-                  style="
-                    display: flex;
-                    align-items: center;
-                    margin-bottom: 0.125rem;
-                  "
-                >
-                  <h4>Port: <small>{{ printer.port }}</small></h4>
-                </div>
-                <div
-                  style="
-                    display: flex;
-                    align-items: center;
-                    margin-bottom: 0.125rem;
-                  "
-                >
-                  <h4>
-                    Content:
-                    <small>{{ showPrinterContent(printer.content) }}</small>
-                  </h4>
-                </div>
-                <div class="d-flex mt-3">
-                  <button
-                    class="btn btn-primary"
-                    type="button"
-                    @click="showPrinterForm(printer)"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    class="btn btn-danger"
-                    style="margin-left: auto"
-                    type="button"
-                    @click="deletePrinter(printer)"
-                  >
-                    Delete
-                  </button>
-                </div>
+            <div class="status-card">
+              <div class="status-icon">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M6 9V2H18V9"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                  <path
+                    d="M6 18H4C3.44772 18 3 17.5523 3 17V11C3 10.4477 3.44772 10 4 10H20C20.5523 10 21 10.4477 21 11V17C21 17.5523 20.5523 18 20 18H18"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                  <path
+                    d="M18 14H6V22H18V14Z"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </div>
+              <div class="status-info">
+                <h4>Printers</h4>
+                <p>{{ activePrinters.length }} configured</p>
+              </div>
+            </div>
+            <div class="status-card">
+              <div class="status-icon">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M12 8V12L15 15"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="9"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  />
+                </svg>
+              </div>
+              <div class="status-info">
+                <h4>Last Activity</h4>
+                <p>{{ isFetching ? 'Printing...' : 'Idle' }}</p>
               </div>
             </div>
           </div>
         </div>
       </div>
-      <template v-if="!authenticated">
-        <div
-          class="modal fade show"
-          id="login_modal"
-          role="dialog"
-          tabindex="-1"
-          aria-modal="true"
-          style="padding-right: 15px; display: block"
-        >
-          <div
-            class="modal-dialog modal-sm modal-dialog-centered"
-            role="document"
-          >
-            <div class="modal-content">
-              <div class="modal-body">
-                <div class="form-group">
-                  <label for="password" class="mb-2 h5"
-                    >Enter Your Password</label
-                  >
-                  <input
-                    type="password"
-                    id="password"
-                    class="form-control mb-2"
-                    v-model="password"
-                  />
-                  <button
-                    type="button"
-                    :disabled="!password || isAuthenticating"
-                    class="btn btn-primary"
-                    style="margin-top: 0.5rem; width: 100%"
-                    @click="handleLogin"
-                  >
-                    Authenticate
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="modal-backdrop fade show"></div>
-      </template>
     </div>
-    <script src="assets/js/axios.min.js"></script>
+
     <script type="module" defer src="./app.js"></script>
   </body>
 </html>

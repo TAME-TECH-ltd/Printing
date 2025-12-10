@@ -1,40 +1,118 @@
 {
-  "name": "printing-service",
-  "version": "1.0.0",
+  "name": "print-agent",
+  "version": "3.0.0",
   "main": "main.js",
   "description": "Invoices and Orders printing configurations for different printers",
   "bin": "cli.js",
+  "author": "Geeks Lord Tower",
+  "homepage": "https://tameapps.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tameapps/tame-print-agent.git"
+  },
+  "build": {
+    "appId": "com.tameapps.tamePrintAgent",
+    "productName": "Tame Print Agent",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "config.js",
+      "index.html",
+      "app.js",
+      "assets/**/*",
+      "package.json",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!**/node_modules/*.d.ts",
+      "!**/node_modules/.bin",
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
+      "!**/._*",
+      "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}",
+      "!**/{__pycache__,thumbs.db,.flowconfig,.idea,.vs,.nyc_output}",
+      "!**/{appveyor.yml,.travis.yml,circle.yml}",
+      "!**/{npm-debug.log,yarn.lock,.yarn-integrity,.yarn-metadata.json}",
+      "!installers/**",
+      "!script/**",
+      "!*.md",
+      "!.gitignore",
+      "!build.bat",
+      "!build.ps1}",
+      "!electron-builder.yml",
+      "!build-optimized.js"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/app-icon/win/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false,
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Tame Print Agent",
+      "installerIcon": "assets/app-icon/win/icon.ico",
+      "uninstallerIcon": "assets/app-icon/win/icon.ico",
+      "artifactName": "TamePrintAgent-Setup-${version}.${ext}",
+      "deleteAppDataOnUninstall": true,
+      "runAfterFinish": true
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/app-icon/mac/icon.icns",
+      "category": "public.app-category.business",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/app-icon/png/icon.png",
+      "category": "Office",
+      "desktop": {
+        "entry": {
+          "Name": "Tame Print Agent",
+          "Comment": "Thermal printer service for invoices and orders",
+          "Keywords": "printing;thermal;invoice;order;business",
+          "StartupNotify": true,
+          "MimeType": "application/x-tame-print-agent",
+          "Categories": "Office;"
+        }
+      }
+    }
+  },
   "scripts": {
-    "serve": "nodemon --exec electron .",
-    "package": "npm-run-all package:*",
-    "package:mac": "electron-packager . --overwrite --platform=darwin --arch=x64 --out=out --icon=assets/app-icon/mac/icon.icns --osx-sign.identity='Developer ID Application: GitHub' --extend-info=assets/mac/info.plist",
-    "package:win": "electron-packager . --overwrite --platform=win32 --arch=ia32 --out=out --icon=assets/app-icon/win/icon.ico",
-    "package:linux": "electron-packager . --overwrite --platform=linux --arch=x64 --out=out",
-    "package:sign-exe": "signcode './out/Tame Apps Printing Service-win32-ia32/Tame Apps Printing Service.exe' --cert ~/tame-apps-printing-service.p12 --prompt --name 'Tame Apps Printing Service' --url 'http://electron.atom.io'",
-    "package:installer": "node ./script/installer.js",
-    "package:sign-installer": "signcode './out/windows-installer/TameAppsPrintingService.exe' --cert ~/tame-apps-printing-service.p12 --prompt --name 'Tame Apps Printing Service' --url 'http://electron.atom.io'",
-    "xpackage:mas": "./script/mas.sh",
-    "windows-store": "node ./script/windows-store.js",
-    "release": "node ./script/release.js",
-    "prepack": "check-for-leaks",
-    "prepush": "check-for-leaks",
-    "package-win": "electron-packager . printing-service --overwrite --asar --platform=win32 --arch=ia32 --icon=assets/app-icon/win/icon.ico --prune=true --out=release-builds --version-string.CompanyName='Tame Apps' --version-string.FileDescription='Tame Apps' --version-string.ProductName=\"Tame Apps Printing Service\"",
-    "create-installer-win": "node installers/windows/createinstaller.js"
+    "start": "electron .",
+    "dev": "cross-env NODE_ENV=development electron .",
+    "build": "npm run build:win",
+    "build:win": "npm run clean && electron-builder --win --x64 --publish=never",
+    "build:win-installer": "npm run clean && electron-builder --win --x64 --config.win.target=nsis --publish=never",
+    "clean": "rimraf release-builds out dist .electron .electron-builder",
+    "postinstall": "electron-builder install-app-deps"
   },
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.7.2",
-    "node-thermal-printer": "^4.4.2",
-    "sequelize": "^6.37.3",
-    "sqlite3": "^5.1.7"
+    "better-sqlite3": "^12.4.1",
+    "node-thermal-printer": "^4.5.0",
+    "laravel-echo": "^2.2.4",
+    "pusher-js": "^8.4.0"
   },
   "devDependencies": {
-    "electron": "^31.2.1",
-    "electron-packager": "^17.1.2",
-    "electron-winstaller": "^5.3.1",
-    "nodemon": "^3.1.3",
-    "request": "^2.88.2",
-    "rimraf": "^6.0.1",
-    "sequelize-cli": "^6.6.2"
+    "cross-env": "^10.0.0",
+    "electron": "^38.2.2",
+    "electron-builder": "^26.0.12",
+    "rimraf": "^6.0.1"
   }
 }

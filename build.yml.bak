@@ -1,0 +1,256 @@
+name: Build and Release Tame Print Agent
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+  release:
+    types: [published]
+  workflow_dispatch: # Allow manual triggering
+
+# Set permissions for the workflow
+permissions:
+  contents: write
+  packages: write
+  pull-requests: read
+
+env:
+  NODE_VERSION: '22'
+  ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+  ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
+  CSC_IDENTITY_AUTO_DISCOVERY: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    strategy:
+      matrix:
+        node-version: [22.x]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Cache Electron
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ELECTRON_CACHE }}
+          key: ${{ runner.os }}-electron-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Cache Electron Builder
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ELECTRON_BUILDER_CACHE }}
+          key: ${{ runner.os }}-electron-builder-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-builder-
+
+      - name: Install dependencies
+        run: |
+          npm ci --prefer-offline --no-audit
+          npm run postinstall
+
+      - name: Lint code
+        run: |
+          Write-Host "Linting completed"
+          # Add any linting commands here if needed
+
+      - name: Build application
+        run: |
+          npx electron-builder --win --x64 --publish=never
+        env:
+          CI: true
+          ELECTRON_CACHE: ${{ env.ELECTRON_CACHE }}
+          ELECTRON_BUILDER_CACHE: ${{ env.ELECTRON_BUILDER_CACHE }}
+          GH_TOKEN: ""
+          CSC_LINK: ""
+          CSC_KEY_PASSWORD: ""
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-${{ matrix.node-version }}
+          path: |
+            dist/
+            release-builds/
+          retention-days: 30
+
+      - name: Check GitHub token permissions
+        if: github.event_name == 'release'
+        run: |
+          Write-Host "Checking GitHub token permissions..."
+          Write-Host "Token available: $($env:GITHUB_TOKEN -ne $null)"
+          Write-Host "Event name: ${{ github.event_name }}"
+          Write-Host "Repository: ${{ github.repository }}"
+          
+          # Check if we have a valid token
+          if (-not $env:GITHUB_TOKEN) {
+            Write-Host "No GITHUB_TOKEN found"
+            exit 1
+          }
+          
+          # Test token with a simple API call
+          try {
+            $headers = @{
+              "Authorization" = "token ${{ secrets.GITHUB_TOKEN }}"
+              "Accept" = "application/vnd.github.v3+json"
+            }
+            $response = Invoke-RestMethod -Uri "https://api.github.com/user" -Headers $headers
+            Write-Host "Token is valid. User: $($response.login)"
+            Write-Host "User permissions: $($response.permissions | ConvertTo-Json)"
+          } catch {
+            Write-Host "Token check failed: $($_.Exception.Message)"
+            Write-Host "Response: $($_.Exception.Response)"
+            Write-Host "This might be due to insufficient permissions. Check repository settings."
+            exit 1
+          }
+
+      - name: Create Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        continue-on-error: true
+        with:
+          files: |
+            dist/*.exe
+            dist/*.msi
+            dist/*.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Creation Status
+        if: github.event_name == 'release'
+        run: |
+          $releaseOutcome = "${{ steps.create-release.outcome }}"
+          Write-Host "Release outcome: $releaseOutcome"
+          if ($releaseOutcome -eq 'success') {
+            Write-Host "✅ Release created successfully"
+          } else {
+            Write-Host "⚠️ Release creation failed or skipped due to insufficient permissions"
+            Write-Host "Build artifacts are still available in the workflow artifacts"
+          }
+
+  release:
+    needs: build
+    runs-on: windows-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    # Set permissions for the release job
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: read
+    
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Find latest build
+        id: find-latest
+        run: |
+          Write-Host "Contents of artifacts directory:"
+          Get-ChildItem -Path "artifacts" -Recurse | Format-Table -AutoSize
+          $latestBuild = Get-ChildItem -Path "artifacts" -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          echo "latest-build=$($latestBuild.Name)" >> $env:GITHUB_OUTPUT
+          Write-Host "Selected latest build: $($latestBuild.Name)"
+          Write-Host "Files in latest build:"
+          Get-ChildItem -Path "artifacts/$($latestBuild.Name)" -Recurse | Format-Table -AutoSize
+
+      - name: Check GitHub token permissions
+        run: |
+          Write-Host "Checking GitHub token permissions..."
+          Write-Host "Token available: $($env:GITHUB_TOKEN -ne $null)"
+          Write-Host "Event name: ${{ github.event_name }}"
+          Write-Host "Repository: ${{ github.repository }}"
+          Write-Host "Token length: $($env:GITHUB_TOKEN.Length)"
+          
+          # Check if we have a valid token
+          if (-not $env:GITHUB_TOKEN -or $env:GITHUB_TOKEN -eq "") {
+            Write-Host "No GITHUB_TOKEN found in environment"
+            Write-Host "Available environment variables:"
+            Get-ChildItem Env: | Where-Object { $_.Name -like "*GITHUB*" -or $_.Name -like "*TOKEN*" } | Format-Table
+            exit 1
+          }
+          
+          # Test token with a simple API call
+          try {
+            $headers = @{
+              "Authorization" = "token $env:GITHUB_TOKEN"
+              "Accept" = "application/vnd.github.v3+json"
+            }
+            $response = Invoke-RestMethod -Uri "https://api.github.com/user" -Headers $headers
+            Write-Host "Token is valid. User: $($response.login)"
+            Write-Host "User permissions: $($response.permissions | ConvertTo-Json)"
+          } catch {
+            Write-Host "Token check failed: $($_.Exception.Message)"
+            Write-Host "Response: $($_.Exception.Response)"
+            Write-Host "This is likely due to restricted repository permissions."
+            Write-Host "The GITHUB_TOKEN has limited access. This is normal for security."
+            Write-Host "Release creation will be attempted anyway..."
+            # Don't exit, continue with release creation
+          }
+
+      - name: Check Repository Settings
+        run: |
+          Write-Host "Repository Settings Information:"
+          Write-Host "Repository: ${{ github.repository }}"
+          Write-Host "Repository Owner: ${{ github.repository_owner }}"
+          Write-Host "Actor: ${{ github.actor }}"
+          Write-Host "Ref: ${{ github.ref }}"
+          Write-Host "Event Name: ${{ github.event_name }}"
+          Write-Host ""
+          Write-Host "If release creation fails, check:"
+          Write-Host "1. Repository Settings > Actions > General > Workflow permissions"
+          Write-Host "2. Ensure 'Read and write permissions' is selected"
+          Write-Host "3. Check 'Allow GitHub Actions to create and approve pull requests'"
+          Write-Host "4. If using organization, check organization settings"
+
+      - name: Create Release
+        id: create-release
+        uses: softprops/action-gh-release@v1
+        continue-on-error: true
+        with:
+          files: |
+            artifacts/${{ steps.find-latest.outputs.latest-build }}/**/*.exe
+            artifacts/${{ steps.find-latest.outputs.latest-build }}/**/*.msi
+            artifacts/${{ steps.find-latest.outputs.latest-build }}/**/*.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          tag_name: v${{ github.run_number }}
+          name: Release v${{ github.run_number }}
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Creation Status
+        run: |
+          $releaseOutcome = "${{ steps.create-release.outcome }}"
+          Write-Host "Release outcome: $releaseOutcome"
+          if ($releaseOutcome -eq 'success') {
+            Write-Host "✅ Release created successfully"
+          } else {
+            Write-Host "⚠️ Release creation failed or skipped due to insufficient permissions"
+            Write-Host "Build artifacts are still available in the workflow artifacts"
+          }

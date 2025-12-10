@@ -1,0 +1,101 @@
+name: Build and Release Tame Print Agent
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+  release:
+    types: [published]
+  workflow_dispatch: # Manual trigger
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: read
+
+env:
+  NODE_VERSION: '22'
+  ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+  ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
+  CSC_IDENTITY_AUTO_DISCOVERY: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Cache Electron
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ELECTRON_CACHE }}
+          key: ${{ runner.os }}-electron-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Cache Electron Builder
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ELECTRON_BUILDER_CACHE }}
+          key: ${{ runner.os }}-electron-builder-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-builder-
+
+      - name: Install dependencies
+        run: |
+          npm ci --prefer-offline --no-audit
+          npm run postinstall
+
+      - name: Build application
+        run: |
+          npx electron-builder --win --x64 --publish=never
+        env:
+          CI: true
+          ELECTRON_CACHE: ${{ env.ELECTRON_CACHE }}
+          ELECTRON_BUILDER_CACHE: ${{ env.ELECTRON_BUILDER_CACHE }}
+          CSC_LINK: ""
+          CSC_KEY_PASSWORD: ""
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      # 🏷️ Extract version from package.json
+      - name: Read version from package.json
+        id: pkg
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "Detected version: v$version"
+
+      # 🚀 Upload directly to GitHub Release
+      - name: Upload build to GitHub Release
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.pkg.outputs.version }}
+          name: Release v${{ steps.pkg.outputs.version }}
+          files: |
+            dist/*.exe
+            dist/*.msi
+            dist/*.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Creation Status
+        run: |
+          Write-Host "✅ Build completed successfully."
+          Write-Host "Version: v${{ steps.pkg.outputs.version }}"
+          Write-Host "If release upload succeeded, check the 'Releases' tab in your repository."
