@@ -150,6 +150,38 @@ contextBridge.exposeInMainWorld("electronAPI", {
     }
   },
 
+  // **NEW: Get environment variables for broadcasting**
+  getEnv: (key) => {
+    // Whitelist allowed environment variables
+    const allowedEnvVars = [
+      "VITE_REVERB_HOST",
+      "VITE_REVERB_PORT",
+      "VITE_REVERB_APP_KEY",
+      "VITE_REVERB_SCHEME",
+      "VITE_APP_ENV",
+      "VITE_AUTH_ENDPOINT",
+    ];
+
+    if (!allowedEnvVars.includes(key)) {
+      console.warn(`Environment variable ${key} is not whitelisted`);
+      return null;
+    }
+
+    return process.env[key];
+  },
+
+  // **NEW: Get all broadcasting environment variables at once**
+  getBroadcastConfig: () => {
+    return {
+      VITE_REVERB_HOST: process.env.VITE_REVERB_HOST || "localhost",
+      VITE_REVERB_PORT: process.env.VITE_REVERB_PORT || "8080",
+      VITE_REVERB_APP_KEY: process.env.VITE_REVERB_APP_KEY,
+      VITE_REVERB_SCHEME: process.env.VITE_REVERB_SCHEME || "http",
+      VITE_APP_ENV: process.env.VITE_APP_ENV || "development",
+      VITE_AUTH_ENDPOINT: process.env.VITE_AUTH_ENDPOINT,
+    };
+  },
+
   // Utility functions for Electron 38.x
   utils: {
     // Format memory size

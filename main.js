@@ -419,7 +419,7 @@ function createWindow() {
     }
   }
 
-  mainWindow.setTitle("Tame Print Agent v1.2.2");
+  mainWindow.setTitle("Tame Print Agent");
 
   // Load the app with security headers for Electron 38.x
   mainWindow.loadFile("index.html");

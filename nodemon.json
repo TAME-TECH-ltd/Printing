@@ -1,0 +1,5 @@
+{
+  "watch": ["main.js", "preload.js", "config.js", "cli.js", "index.html"],
+  "ignore": ["node_modules", "dist", "release-builds", "out"],
+  "ext": "js,json"
+}

@@ -370,12 +370,12 @@ const App = {
               addBkendIfProduction(
                 settings.base_url,
                 outletCode.value
-                  ? `/api/frontend/preloaders/${outletCode.value}`
-                  : "/api/frontend/preloaders"
+                  ? `/api/preloaders/${outletCode.value}`
+                  : "/api/preloaders"
               )
             )
             .then((response) => {
-              appSettings.value = response?.data?.company;
+              appSettings.value = response?.data;
               if (activePrinters.value.length) {
                 resumeFetching();
               }
@@ -625,21 +625,21 @@ const App = {
           addBkendIfProduction(
             url.value,
             outletCode.value
-              ? `/api/frontend/preloaders/${outletCode.value}`
-              : "/api/frontend/preloaders"
+              ? `/api/preloaders/${outletCode.value}`
+              : "/api/preloaders"
           )
         )
         .then((response) => {
-          if (response.data && response.data.company) {
+          if (response.data) {
             toggleFlashMessage({
               type: "success",
               text: "Connection successful! API endpoint is working.",
             });
-            appSettings.value = response.data.company;
+            appSettings.value = response.data;
           } else {
             toggleFlashMessage({
               type: "warning",
-              text: "Connection successful but no company data found.",
+              text: "Connection successful but no settings data found.",
             });
           }
         })
