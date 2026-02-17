@@ -368,10 +368,10 @@ function createWindow() {
   const iconPath = getIconPath();
 
   mainWindow = new BrowserWindow({
-    width: 620,
-    height: 430,
-    minWidth: 460,
-    minHeight: 320,
+    width: 590,
+    height: 410,
+    minWidth: 440,
+    minHeight: 300,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
@@ -619,10 +619,9 @@ ipcMain.handle("get-system-info", async (event) => {
 
 ipcMain.handle("print-content", async (event, data) => {
   const options = {
-    type: PrinterTypes[data.type],
+    type: PrinterTypes[data.type], // or PrinterTypes.STAR
     characterSet: CharacterSet.PC852_LATIN2,
     removeSpecialCharacters: false,
-    lineCharacter: ".",
     breakLine: BreakLine.WORD,
     options: {
       timeout: 5000,
@@ -634,57 +633,61 @@ ipcMain.handle("print-content", async (event, data) => {
     options.interface = `//localhost/${data.port}`;
   }
   const printer = new ThermalPrinter(options);
-  const orderDate = `${data?.order?.system_date} ${data?.order?.order_time}`;
+
   try {
     await printer.isPrinterConnected();
     printer.alignCenter();
     printer.setTypeFontA();
     printer.setTextDoubleHeight();
     printer.setTextDoubleWidth();
-    printer.println(data?.settings?.name);
+    printer.println(data?.settings?.site_name);
     printer.setTextNormal();
-    printer.println(`TIN: ${data?.settings?.tin_number}`);
-    printer.println(`Tel: ${data?.settings?.phone}`);
-    printer.println(`Email: ${data?.settings?.email}`);
-    printer.println(`Address: ${data?.settings?.address_line}`);
-    if (data?.round?.category === "INVOICE") {
-      printer.print(`MOMO Code: `);
-      printer.bold(true);
-      printer.print(`${data?.settings?.momo_code}`);
-      printer.bold(false);
-      printer.setTextNormal();
-      printer.newLine();
-    }
+    printer.println(`TIN: ${data?.settings?.app_tin}`);
+    printer.println(`Tel: ${data?.settings?.app_phone}`);
+    printer.println(`Email: ${data?.settings?.app_email}`);
+    printer.println(`Address: ${data?.settings?.site_address}`);
     printer.drawLine();
-
     printer.alignLeft();
+
+    const isReceipt = data?.order?.ebm_meta || data?.round?.origin === "RETAIL";
     if (data?.round?.category === "ORDER") {
       printer.println(
         `Order #: ${helper.generateVoucherNo(data?.round?.round_no)}(${
-          data?.round?.destination_name
+          data?.round?.destination
         })`,
       );
     } else if (data?.round?.category === "INVOICE") {
       printer.println(
-        `Invoice #: ${helper.generateVoucherNo(data?.order?.id)}`,
+        `${isReceipt ? "RECEIPT" : "INVOICE"} #: ${helper.generateVoucherNo(
+          data?.order?.id,
+        )}`,
+      );
+    } else {
+      // printer.print(`\x1B\x45\x01${data?.settings?.momo_code}\x1B\x45\x00`);
+      printer.println(
+        `\x1B\x45\x01Round Slip #\x1B\x45\x00: ${helper.generateVoucherNo(
+          data?.round?.round_no,
+        )}`,
       );
     }
     printer.println(`Customer: ${data?.order?.client || "Walk-In"}`);
-    printer.tableCustom([
-      {
-        text: `Served By: ${data?.order?.waiter}`,
-        align: "LEFT",
-      },
-      { text: `Table No: ${data?.order?.table_name}`, align: "RIGHT" },
-    ]);
+    if (!isReceipt) {
+      printer.tableCustom([
+        {
+          text: `Served By: ${data?.order?.waiter}`,
+          align: "LEFT",
+        },
+        { text: `Table No: ${data?.order?.table_name}`, align: "RIGHT" },
+      ]);
+    }
 
     printer.tableCustom([
       {
-        text: `Date: ${helper.formatDate(orderDate)}`,
+        text: `Date: ${helper.formatDate(data?.order?.system_date)}`,
         align: "LEFT",
       },
       {
-        text: `Time: ${helper.formatTime(orderDate)}`,
+        text: `Time: ${helper.formatTime(data?.order?.order_time)}`,
         align: "RIGHT",
       },
     ]);
@@ -721,39 +724,31 @@ ipcMain.handle("print-content", async (event, data) => {
     });
 
     printer.drawLine();
+
     if (data?.round?.category === "INVOICE") {
-      printer.alignRight();
-      printer.newLine();
-      printer.println(
-        `Tax(VAT - 18%): RWF ${
-          helper.formatMoney(Number(data?.order?.total_taxes)).split(".")[0]
-        }`,
-      );
-      printer.newLine();
-      printer.setTextDoubleWidth();
-      printer.println(
-        `Total: RWF ${helper.formatMoney(Number(data?.order?.grand_total))}`,
-      );
-      printer.setTextNormal();
-      printer.drawLine();
-      printer.alignCenter();
-      printer.newLine();
-      printer.println(`Notes: This is not a legal receipt.`);
-      printer.newLine();
-      printer.setTypeFontB();
-      printer.println(`THANKS FOR VISITING!!`);
-      printer.setTextNormal();
-      printer.newLine();
-      printer.printQR("https://tameapp.cloud", {
-        cellSize: 6,
-        correction: "H",
-      });
       if (data?.order?.ebm_meta) {
+        const totals = [
+          ["Total Rwf", `${data?.order?.grand_total}`],
+          ["Total A-EX Rwf", `0.00`],
+          ["Total B-18% Rwf", `${data?.order?.total_taxes}`],
+          ["Total D", `0.00`],
+          ["Total Tax Rwf", `${data?.order?.total_taxes}`],
+        ];
+
+        totals.forEach((item) => {
+          printer.tableCustom([
+            { text: item[0], align: "LEFT" },
+            { text: item[1], align: "RIGHT" },
+          ]);
+        });
+
+        printer.drawLine();
         const invoiceMeta = data?.order?.ebm_meta;
         printer.newLine();
         printer.bold(true);
         printer.print("SDC INFORMATION");
         printer.bold(false);
+        printer.newLine();
         printer.setTextNormal();
         printer.drawLine();
         printer.println(
@@ -763,14 +758,59 @@ ipcMain.handle("print-content", async (event, data) => {
         printer.println(`Internal Data: ${invoiceMeta.intrlData}`);
         printer.println(`Receipt Signature: ${invoiceMeta.rcptSign}`);
         printer.println(`MRC: ${invoiceMeta.mrcNo}`);
+        printer.newLine();
+        printer.alignCenter();
+        printer.printQR(
+          `https://myrra.rra.gov.rw/common/link/ebm/receipt/indexEbmReceiptData?Data=${invoiceMeta.rcptSign}`,
+          {
+            cellSize: 3,
+            correction: "Q",
+          },
+        );
+        printer.println(`Powered by EBM v2.1`);
+      } else {
+        printer.alignRight();
+        printer.setTextDoubleWidth();
+        printer.println(
+          `Total: ${helper.formatMoney(data?.order?.grand_total)}`,
+        );
+        printer.setTextNormal();
+        printer.drawLine();
+        printer.alignCenter();
+        printer.print(`Dial `);
+        printer.bold(true);
+        //printer.print(`\x1B\x45\x01${data?.settings?.momo_code}\x1B\x45\x00`);
+        printer.setTextQuadArea();
+        printer.setTypeFontB();
+        printer.print(`${data?.settings?.momo_code}`);
+        printer.bold(false);
+        printer.setTextNormal();
+        printer.setTypeFontA();
+        printer.print(` to pay with MOMO`);
+        printer.newLine();
+        printer.println(
+          `This is not a legal receipt. Please ask your legal receipt.`,
+        );
+        printer.println(`Thank you!`);
       }
+    } else if (data?.round?.category === "ROUND_SLIP") {
+      const total = data?.items?.reduce((a, b) => a + Number(b.amount), 0);
+      printer.alignRight();
+      printer.setTextDoubleWidth();
+      printer.println(`Total: ${helper.formatMoney(total)}`);
+      printer.setTextNormal();
+      printer.drawLine();
+      printer.alignCenter();
+      printer.println(
+        "This is neither a legal receipt or final invoice. It is just a round total slip.",
+      );
     }
     printer.cut();
     printer.beep();
     await printer.execute();
     mainWindow?.webContents.send("printedContent", {
       latest: data?.round?.id,
-      content: data?.content,
+      ...(data?.content ? { content: data.content } : {}),
     });
   } catch (error) {
     mainWindow?.webContents.send("retryPrinting", data);

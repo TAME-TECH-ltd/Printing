@@ -21,31 +21,12 @@
         <div class="login-box">
           <div class="login-header">
             <div class="login-logo">
-              <svg viewBox="0 0 24 24" fill="none" class="logo-icon">
-                <path
-                  d="M6 9V2H18V9"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-                <path
-                  d="M6 18H4C3.44772 18 3 17.5523 3 17V11C3 10.4477 3.44772 10 4 10H20C20.5523 10 21 10.4477 21 11V17C21 17.5523 20.5523 18 20 18H18"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-                <path
-                  d="M18 14H6V22H18V14Z"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
+              <img
+                src="assets/icons/logo.png"
+                alt="Printing Service Logo"
+                class="logo-icon"
+              />
             </div>
-            <h2>Printing Service</h2>
           </div>
           <form @submit.prevent="handleLogin" class="login-form">
             <div class="form-group">
@@ -85,24 +66,41 @@
           </div>
           <div class="header-content">
             <h1 class="page-title">Printers</h1>
-            <button
-              @click="handleLogout"
-              class="btn btn-outline-secondary btn-sm logout-btn"
-            >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
+            <div style="display: flex; align-items: center; gap: 10px">
+              <button
+                class="add-btn btn-sm logout-btn"
+                v-show="displayMode === 'PRINTERS_VIEW'"
+                @click="showPrinterForm()"
               >
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-                <polyline points="16,17 21,12 16,7"></polyline>
-                <line x1="21" y1="12" x2="9" y2="12"></line>
-              </svg>
-              Sign out
-            </button>
+                <svg class="add-icon" viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M12 5V19M5 12H19"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                  />
+                </svg>
+                New Printer
+              </button>
+              <button
+                @click="handleLogout"
+                class="btn btn-outline-secondary btn-sm logout-btn"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                  <polyline points="16,17 21,12 16,7"></polyline>
+                  <line x1="21" y1="12" x2="9" y2="12"></line>
+                </svg>
+                Sign out
+              </button>
+            </div>
           </div>
         </div>
 
@@ -217,11 +215,8 @@
                     Check
                   </button>
                 </div>
-                <small class="form-help">
-                  Enter your server base URL.
-                </small>
                 <div class="form-group" style="margin-top: 10px">
-                  <label for="outletCode">Outlet code (optional)</label>
+                  <label for="outletCode">Branch Reference</label>
                   <input
                     type="text"
                     id="outletCode"
@@ -229,29 +224,10 @@
                     class="form-control"
                     placeholder="e.g. 875773664"
                   />
-                  <small class="form-help"
-                    >If set, requests use: `/api/.../{outletCode}`.</small
-                  >
                 </div>
               </div>
             </div>
           </div>
-        </div>
-
-        <!-- Add Printer Section -->
-        <div class="add-section" v-show="displayMode === 'PRINTERS_VIEW'">
-          <button class="add-btn" @click="showPrinterForm()">
-            <svg class="add-icon" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M12 5V19M5 12H19"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-              />
-            </svg>
-            New Printer
-          </button>
-          <p class="add-description">Add and manage your print destinations.</p>
         </div>
 
         <!-- Printers List -->
@@ -397,9 +373,7 @@
         <div v-if="displayMode === 'FORM_VIEW'" class="printer-form-section">
           <div class="form-container">
             <div class="form-header">
-              <h3>
-                {{ selectedPrinterId ? 'Edit Printer' : 'Add Printer' }}
-              </h3>
+              <h3>{{ selectedPrinterId ? 'Edit Printer' : 'Add Printer' }}</h3>
               <button
                 class="close-btn"
                 @click="handleCancel"

@@ -166,8 +166,8 @@ button:disabled {
 
 .btn-primary,
 .add-btn {
-  border-color: #2f88de;
-  background: linear-gradient(180deg, #3797f3 0%, #2287e8 100%);
+  border-color: #2f88de !important;
+  background: linear-gradient(180deg, #3797f3 0%, #2287e8 100%) !important;
   color: #ffffff;
 }
 
@@ -241,7 +241,7 @@ button:disabled {
 
 .login-box {
   width: 100%;
-  max-width: 340px;
+  max-width: 240px;
   padding: 20px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
@@ -475,8 +475,12 @@ button:disabled {
   padding: 12px;
 }
 
+.add-section {
+  padding: 10px 12px;
+}
+
 .add-description {
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   font-size: var(--fs-12);
   color: var(--text-muted);
 }
@@ -651,8 +655,8 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
-  padding-bottom: 9px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -681,13 +685,14 @@ button:disabled {
 .printer-form {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  gap: 8px;
+  align-items: start;
 }
 
 .form-row:first-child {
@@ -697,13 +702,17 @@ button:disabled {
 .form-group {
   display: flex;
   flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
 
 .content-options {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 9px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 8px 9px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: #1d222d;
@@ -716,6 +725,7 @@ button:disabled {
   font-size: var(--fs-12);
   color: var(--text-secondary);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .checkbox-label input[type="checkbox"] {
@@ -749,8 +759,8 @@ button:disabled {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 2px;
-  padding-top: 10px;
+  margin-top: 0;
+  padding-top: 8px;
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -801,12 +811,8 @@ button:disabled {
   }
 
   .url-input-group {
-    flex-direction: column;
+    flex-direction: row;
     align-items: stretch;
-  }
-
-  .url-input-group .btn {
-    width: 100%;
   }
 
   .form-row {
