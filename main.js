@@ -368,10 +368,10 @@ function createWindow() {
   const iconPath = getIconPath();
 
   mainWindow = new BrowserWindow({
-    width: 700,
-    height: 500,
-    minWidth: 500,
-    minHeight: 350,
+    width: 620,
+    height: 430,
+    minWidth: 460,
+    minHeight: 320,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,

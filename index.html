@@ -4,12 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Printing Service</title>
-    <link rel="stylesheet" href="assets/css/custom.css?ver=1.0.4" />
+    <link rel="stylesheet" href="assets/css/custom.css?ver=1.1.0" />
     <script src="assets/js/vue.global.js"></script>
     <script src="assets/js/axios.min.js"></script>
   </head>
-  <body>
-    <div id="app">
+  <body class="dark-mode">
+    <div id="app" class="dark-mode">
       <!-- Non-blocking Loading Indicator -->
       <div v-if="isLoading" class="loading-indicator">
         <div class="loading-dot"></div>
@@ -55,7 +55,7 @@
                 id="password"
                 v-model="password"
                 class="form-control"
-                placeholder="Enter password"
+                placeholder="Enter app password"
                 required
                 :disabled="isAuthenticating"
               />
@@ -66,8 +66,8 @@
                 class="btn btn-primary btn-block"
                 :disabled="isAuthenticating || !password"
               >
-                <span v-if="isAuthenticating">Authenticating...</span>
-                <span v-else>Login</span>
+                <span v-if="isAuthenticating">Signing in...</span>
+                <span v-else>Sign in</span>
               </button>
             </div>
           </form>
@@ -81,10 +81,10 @@
           <div class="breadcrumb">
             <span class="breadcrumb-item">Printing Service</span>
             <span class="breadcrumb-separator">></span>
-            <span class="breadcrumb-item current">Printer Management</span>
+            <span class="breadcrumb-item current">Printers</span>
           </div>
           <div class="header-content">
-            <h1 class="page-title">Printer Management</h1>
+            <h1 class="page-title">Printers</h1>
             <button
               @click="handleLogout"
               class="btn btn-outline-secondary btn-sm logout-btn"
@@ -101,7 +101,7 @@
                 <polyline points="16,17 21,12 16,7"></polyline>
                 <line x1="21" y1="12" x2="9" y2="12"></line>
               </svg>
-              Logout
+              Sign out
             </button>
           </div>
         </div>
@@ -177,8 +177,13 @@
         <!-- URL Configuration Section -->
         <div class="url-section" :class="{ collapsed: !showApiConfig }">
           <div class="section-header" @click="toggleApiConfig">
-            <h2 class="section-title">API Configuration</h2>
-            <button class="toggle-btn" :class="{ expanded: showApiConfig }">
+            <h2 class="section-title">Connection</h2>
+            <button
+              type="button"
+              class="toggle-btn"
+              :class="{ expanded: showApiConfig }"
+              aria-label="Toggle connection settings"
+            >
               <svg viewBox="0 0 24 24" fill="none">
                 <path
                   d="M6 9L12 15L18 9"
@@ -193,7 +198,7 @@
           <div class="section-content" v-show="showApiConfig">
             <div class="url-form">
               <div class="form-group">
-                <label for="apiUrl">API Base URL</label>
+                <label for="apiUrl">Server URL</label>
                 <div class="url-input-group">
                   <input
                     type="text"
@@ -209,14 +214,14 @@
                     @click="testConnection"
                     :disabled="!url"
                   >
-                    Test Connection
+                    Check
                   </button>
                 </div>
                 <small class="form-help">
-                  Enter the base URL for your invoice API endpoint
+                  Enter your server base URL.
                 </small>
                 <div class="form-group" style="margin-top: 10px">
-                  <label for="outletCode">Outlet Code (optional)</label>
+                  <label for="outletCode">Outlet code (optional)</label>
                   <input
                     type="text"
                     id="outletCode"
@@ -225,9 +230,7 @@
                     placeholder="e.g. 875773664"
                   />
                   <small class="form-help"
-                    >If provided, will be added to all requests as a path
-                    segment just after the API endpoint (e.g.
-                    /endpoint/OUTLETCODE).</small
+                    >If set, requests use: `/api/.../{outletCode}`.</small
                   >
                 </div>
               </div>
@@ -246,16 +249,14 @@
                 stroke-linecap="round"
               />
             </svg>
-            Add Printer
+            New Printer
           </button>
-          <p class="add-description">
-            Add thermal printers, configure settings, and manage connections
-          </p>
+          <p class="add-description">Add and manage your print destinations.</p>
         </div>
 
         <!-- Printers List -->
         <div class="printers-section" v-show="displayMode === 'PRINTERS_VIEW'">
-          <h2 class="section-title">Configured Printers</h2>
+          <h2 class="section-title">Your Printers</h2>
 
           <div v-if="!activePrinters.length" class="empty-state">
             <div class="empty-icon">
@@ -284,9 +285,9 @@
               </svg>
             </div>
             <h3>No printers configured</h3>
-            <p>Add your first printer to get started with invoice printing</p>
+            <p>Add a printer to start printing orders and invoices.</p>
             <button class="btn btn-primary" @click="showPrinterForm()">
-              Add First Printer
+              Add Printer
             </button>
           </div>
 
@@ -337,7 +338,7 @@
                   >
                 </div>
                 <div class="printer-content">
-                  <span class="content-label">Content:</span>
+                  <span class="content-label">Prints:</span>
                   <span class="content-value"
                     >{{ showPrinterContent(printer.content) }}</span
                   >
@@ -397,9 +398,15 @@
           <div class="form-container">
             <div class="form-header">
               <h3>
-                {{ selectedPrinterId ? 'Edit Printer' : 'Add New Printer' }}
+                {{ selectedPrinterId ? 'Edit Printer' : 'Add Printer' }}
               </h3>
-              <button class="close-btn" @click="handleCancel">×</button>
+              <button
+                class="close-btn"
+                @click="handleCancel"
+                aria-label="Close printer form"
+              >
+                ×
+              </button>
             </div>
 
             <form @submit.prevent="setPrinter" class="printer-form">
@@ -412,7 +419,7 @@
                     class="form-control"
                     required
                   >
-                    <option value="">Select System Printer</option>
+                    <option value="">Choose system printer</option>
                     <option
                       v-for="printer in printers"
                       :key="printer.name"
@@ -426,7 +433,7 @@
 
               <div class="form-row">
                 <div class="form-group">
-                  <label for="printerType">Printer Type</label>
+                  <label for="printerType">Printer Brand</label>
                   <select
                     id="printerType"
                     v-model="printerType"
@@ -446,8 +453,8 @@
                     class="form-control"
                     required
                   >
-                    <option value="TCP">TCP/IP</option>
-                    <option value="USB">USB</option>
+                    <option value="TCP">Network (TCP/IP)</option>
+                    <option value="USB">Shared USB</option>
                   </select>
                 </div>
               </div>
@@ -465,7 +472,7 @@
                   />
                 </div>
                 <div v-else class="form-group">
-                  <label for="printerPort">Share Name</label>
+                  <label for="printerPort">Shared Name</label>
                   <input
                     type="text"
                     id="printerPort"
@@ -479,17 +486,17 @@
 
               <div class="form-row">
                 <div class="form-group">
-                  <label for="printerContent">Print Content</label>
+                  <label for="printerContent">What to Print</label>
                   <div class="content-options">
                     <label class="checkbox-label">
                       <input type="checkbox" v-model="content" value="K" />
                       <span class="checkmark"></span>
-                      Kitchen Orders
+                      Kitchen
                     </label>
                     <label class="checkbox-label">
                       <input type="checkbox" v-model="content" value="B" />
                       <span class="checkmark"></span>
-                      Bar Orders
+                      Bar
                     </label>
                     <label class="checkbox-label">
                       <input type="checkbox" v-model="content" value="I" />
