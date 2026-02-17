@@ -1,0 +1,116 @@
+{
+  "name": "printing-service",
+  "version": "2.0.0",
+  "main": "main.js",
+  "description": "Invoices and Orders printing configurations for different printers",
+  "bin": "cli.js",
+  "author": "Tame Tech",
+  "homepage": "https://tameapp.cloud",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TAME-TECH-ltd/Printing.git"
+  },
+  "build": {
+    "appId": "com.tame.printingservice",
+    "productName": "Printing Service",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "config.js",
+      "index.html",
+      "app.js",
+      "assets/**/*",
+      "package.json",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!**/node_modules/*.d.ts",
+      "!**/node_modules/.bin",
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
+      "!**/._*",
+      "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}",
+      "!**/{__pycache__,thumbs.db,.flowconfig,.idea,.vs,.nyc_output}",
+      "!**/{appveyor.yml,.travis.yml,circle.yml}",
+      "!**/{npm-debug.log,yarn.lock,.yarn-integrity,.yarn-metadata.json}",
+      "!installers/**",
+      "!script/**",
+      "!*.md",
+      "!.gitignore",
+      "!build.bat",
+      "!build.ps1}",
+      "!electron-builder.yml",
+      "!build-optimized.js"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/app-icon/win/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false,
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Printing Service",
+      "installerIcon": "assets/app-icon/win/icon.ico",
+      "uninstallerIcon": "assets/app-icon/win/icon.ico",
+      "artifactName": "PrintingService-Setup-${version}.${ext}",
+      "deleteAppDataOnUninstall": true,
+      "runAfterFinish": true
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/app-icon/mac/icon.icns",
+      "category": "public.app-category.business",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/app-icon/png/icon.png",
+      "category": "Office",
+      "desktop": {
+        "entry": {
+          "Name": "Printing Service",
+          "Comment": "Thermal printer service for invoices and orders",
+          "Keywords": "printing;thermal;invoice;order;business",
+          "StartupNotify": true,
+          "MimeType": "application/x-printing-service",
+          "Categories": "Office;"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env NODE_ENV=development electron .",
+    "build": "npm run build:win",
+    "build:win": "npm run clean && electron-builder --win --x64 --publish=never",
+    "build:win-installer": "npm run clean && electron-builder --win --x64 --config.win.target=nsis --publish=never",
+    "clean": "rimraf release-builds out dist .electron .electron-builder",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "node-thermal-printer": "^4.5.0"
+  },
+  "devDependencies": {
+    "cross-env": "^10.0.0",
+    "electron": "^38.2.2",
+    "electron-builder": "^26.0.12",
+    "rimraf": "^6.0.1"
+  }
+}
