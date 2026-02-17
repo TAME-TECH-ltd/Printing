@@ -79,7 +79,7 @@
     },
     "linux": {
       "target": "AppImage",
-      "icon": "assets/app-icon/png/icon.png",
+      "icon": "assets/app-icon/png",
       "category": "Office",
       "desktop": {
         "entry": {

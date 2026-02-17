@@ -70,7 +70,17 @@ let tray = null;
 let isQuiting = false;
 
 app.setName("Printing Service");
-app.setAppUserModelId("com.tameapp.printingservice");
+app.setAppUserModelId("com.tame.printingservice");
+
+function getIconPath() {
+  if (process.platform === "win32") {
+    return path.join(__dirname, "assets", "app-icon", "win", "icon.ico");
+  }
+  if (process.platform === "darwin") {
+    return path.join(__dirname, "assets", "app-icon", "mac", "icon.icns");
+  }
+  return path.join(__dirname, "assets", "app-icon", "png", "512x512.png");
+}
 
 app.setLoginItemSettings(
   {
@@ -149,13 +159,10 @@ function createMenu() {
 }
 
 function createTray() {
-  const iconPath = path.join(
-    __dirname,
-    "assets",
-    "app-icon",
-    "win",
-    "icon.ico",
-  );
+  const iconPath =
+    process.platform === "win32"
+      ? path.join(__dirname, "assets", "app-icon", "win", "icon.ico")
+      : path.join(__dirname, "assets", "app-icon", "png", "32x32.png");
   const trayIcon = nativeImage.createFromPath(iconPath);
 
   if (process.platform === "darwin") {
@@ -358,13 +365,7 @@ const helper = {
 };
 
 function createWindow() {
-  const iconPath = path.join(
-    __dirname,
-    "assets",
-    "app-icon",
-    "win",
-    "icon.ico",
-  );
+  const iconPath = getIconPath();
 
   mainWindow = new BrowserWindow({
     width: 700,
@@ -393,12 +394,11 @@ function createWindow() {
     center: true,
   });
 
-  // Set the app icon for the taskbar
-  if (process.platform === "win32") {
+  // Reinforce runtime window icon where supported.
+  if (process.platform === "win32" || process.platform === "linux") {
     const icon = nativeImage.createFromPath(iconPath);
     if (!icon.isEmpty()) {
       mainWindow.setIcon(icon);
-      app.dock?.setIcon?.(icon);
     }
   }
 
@@ -468,16 +468,10 @@ function createWindow() {
 
 app.on("ready", () => {
   try {
-    const iconPath = path.join(
-      __dirname,
-      "assets",
-      "app-icon",
-      "win",
-      "icon.ico",
-    );
+    const iconPath = getIconPath();
     const icon = nativeImage.createFromPath(iconPath);
     if (!icon.isEmpty()) {
-      app.dock?.setIcon?.(icon); // For macOS dock
+      app.dock?.setIcon?.(icon);
     }
 
     initializeDatabase();
