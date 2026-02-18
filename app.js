@@ -472,7 +472,7 @@ const App = {
       },
 
       printedContent: (meta) => {
-        setTimeout(() => resumeFetching(meta), 3000);
+        resumeFetching(meta);
       },
 
       retryPrinting: (data) => {
