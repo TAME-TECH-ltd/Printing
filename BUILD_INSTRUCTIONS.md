@@ -1,8 +1,8 @@
-# Printing Service - Build Instructions
+# Tame Print Service - Build Instructions
 
 ## Overview
 
-This document provides comprehensive instructions for building the Printing Service application for Windows, including automated builds via GitHub Actions and local builds.
+This document provides comprehensive instructions for building the Tame Print Service application for Windows, including automated builds via GitHub Actions and local builds.
 
 ## 🚀 Quick Start (GitHub Actions - Recommended)
 

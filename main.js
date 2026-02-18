@@ -69,8 +69,8 @@ let mainWindow;
 let tray = null;
 let isQuiting = false;
 
-app.setName("Printing Service");
-app.setAppUserModelId("com.tame.printingservice");
+app.setName("Tame Print Service");
+app.setAppUserModelId("com.tametech.printservice");
 
 function getIconPath() {
   if (process.platform === "win32") {
@@ -86,7 +86,7 @@ app.setLoginItemSettings(
   {
     openAtLogin: true,
     openAsHidden: true,
-    name: "Printing Service",
+    name: "Tame Print Service",
     path: process.execPath,
     args: ["--hidden"],
   },
@@ -178,7 +178,7 @@ function createTray() {
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: "Show Printing Service",
+      label: "Show Tame Print Service",
       click: () => {
         if (mainWindow) {
           mainWindow.show();
@@ -187,7 +187,7 @@ function createTray() {
       },
     },
     {
-      label: "Hide Printing Service",
+      label: "Hide Tame Print Service",
       click: () => {
         if (mainWindow) {
           mainWindow.hide();
@@ -205,7 +205,7 @@ function createTray() {
   ]);
 
   tray.setContextMenu(contextMenu);
-  tray.setToolTip("Printing Service - Click to show/hide");
+  tray.setToolTip("Tame Print Service - Click to show/hide");
 
   tray.on("click", () => {
     if (mainWindow) {
@@ -402,7 +402,7 @@ function createWindow() {
     }
   }
 
-  mainWindow.setTitle("Printing Service v1.2.2");
+  mainWindow.setTitle("Tame Print Service v1.2.2");
 
   mainWindow.loadFile("index.html");
 

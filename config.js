@@ -1,4 +1,4 @@
-// Configuration file for Printing Service
+// Configuration file for Tame Print Service
 // Set this to false for production builds
 module.exports = {
   // Development mode settings

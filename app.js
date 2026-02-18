@@ -401,7 +401,7 @@ const App = {
     onMounted(() => {
       isAuthenticated.value = false; // Always skip login for now
       console.log(
-        "Printing Service loaded. Login skipped for development mode.",
+        "Tame Print Service loaded. Login skipped for development mode.",
       );
       window.electronAPI.send("authenticated");
 

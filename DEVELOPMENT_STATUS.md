@@ -1,4 +1,4 @@
-# 🚀 Printing Service - Development Status
+# 🚀 Tame Print Service - Development Status
 
 ## ✅ **COMPLETED FEATURES**
 

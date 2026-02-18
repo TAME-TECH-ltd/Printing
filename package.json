@@ -1,5 +1,5 @@
 {
-  "name": "printing-service",
+  "name": "tame-print-service",
   "version": "2.0.0",
   "main": "main.js",
   "description": "Invoices and Orders printing configurations for different printers",
@@ -11,8 +11,8 @@
     "url": "https://github.com/TAME-TECH-ltd/Printing.git"
   },
   "build": {
-    "appId": "com.tame.printingservice",
-    "productName": "Printing Service",
+    "appId": "com.tametech.printservice",
+    "productName": "Tame Print Service",
     "directories": {
       "output": "dist"
     },
@@ -63,7 +63,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Printing Service",
+      "shortcutName": "Tame Print Service",
       "installerIcon": "assets/app-icon/win/icon.ico",
       "uninstallerIcon": "assets/app-icon/win/icon.ico",
       "artifactName": "PrintingService-Setup-${version}.${ext}",
@@ -83,11 +83,11 @@
       "category": "Office",
       "desktop": {
         "entry": {
-          "Name": "Printing Service",
+          "Name": "Tame Print Service",
           "Comment": "Thermal printer service for invoices and orders",
           "Keywords": "printing;thermal;invoice;order;business",
           "StartupNotify": true,
-          "MimeType": "application/x-printing-service",
+          "MimeType": "application/x-tame-print-service",
           "Categories": "Office;"
         }
       }
@@ -105,7 +105,9 @@
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^12.4.1",
-    "node-thermal-printer": "^4.5.0"
+    "laravel-echo": "^2.3.0",
+    "node-thermal-printer": "^4.5.0",
+    "pusher-js": "^8.4.0"
   },
   "devDependencies": {
     "cross-env": "^10.0.0",

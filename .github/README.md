@@ -1,6 +1,6 @@
-# GitHub Actions for Printing Service
+# GitHub Actions for Tame Print Service
 
-This repository includes automated build workflows for the Printing Service application.
+This repository includes automated build workflows for the Tame Print Service application.
 
 ## Workflows
 
@@ -31,7 +31,7 @@ This repository includes automated build workflows for the Printing Service appl
 
 ### Manual Builds
 - Go to Actions tab in GitHub
-- Select "Build Optimized Printing Service"
+- Select "Build Optimized Tame Print Service"
 - Click "Run workflow"
 
 ### Downloading Builds
@@ -43,15 +43,15 @@ This repository includes automated build workflows for the Printing Service appl
 ## Build Outputs
 
 ### Windows
-- `printing-service-windows-optimized`: Optimized build without ffmpeg
+- `tame-print-service-windows-optimized`: Optimized build without ffmpeg
 - Installer: `.exe` or `.msi` files
 
 ### macOS
-- `printing-service-macos`: macOS application
+- `tame-print-service-macos`: macOS application
 - Package: `.dmg` files
 
 ### Linux
-- `printing-service-linux`: Linux application
+- `tame-print-service-linux`: Linux application
 - Package: `.AppImage`, `.deb`, or `.rpm` files
 
 ## Configuration

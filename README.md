@@ -1,4 +1,4 @@
-# Printing Service
+# Tame Print Service
 
 A professional Electron-based desktop application for managing thermal printers and invoice printing configurations. Built with modern Windows 11 design principles and optimized for production deployment.
 
@@ -88,7 +88,7 @@ npm --version
 ```bash
 # Clone the repository
 git clone https://github.com/TAME-TECH-ltd/Printing.git
-cd printing-service
+cd tame-print-service
 
 # Install dependencies
 npm install
@@ -194,7 +194,7 @@ The application uses a modern Windows 11 design system:
 ## 🗄️ Database
 
 ### **SQLite Database**
-- **Location:** `~/.config/printing-service/printing.sqlite`
+- **Location:** `~/.config/tame-print-service/printing.sqlite`
 - **Tables:** `printers`, `settings`, `users`
 - **Auto-initialization** on first run
 - **Default admin user** created automatically
@@ -290,7 +290,7 @@ npm run build:win
 ### **Debug Mode**
 ```bash
 # Enable debug logging
-export DEBUG=printing-service:*
+export DEBUG=tame-print-service:*
 
 # Start with debug
 npm run dev
@@ -316,8 +316,8 @@ npm run dev
 ### **Development Setup**
 ```bash
 # Fork the repository
-git clone https://github.com/your-username/printing-service.git
-cd printing-service
+git clone https://github.com/your-username/tame-print-service.git
+cd tame-print-service
 
 # Install dependencies
 npm install
@@ -351,9 +351,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues:** [GitHub Issues](https://github.com/TAME-TECH-ltd/printing-service/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/TAME-TECH-ltd/printing-service/discussions)
-- **Documentation:** [Wiki](https://github.com/TAME-TECH-ltd/printing-service/wiki)
+- **Issues:** [GitHub Issues](https://github.com/TAME-TECH-ltd/tame-print-service/issues)
+- **Discussions:** [GitHub Discussions](https://github.com/TAME-TECH-ltd/tame-print-service/discussions)
+- **Documentation:** [Wiki](https://github.com/TAME-TECH-ltd/tame-print-service/wiki)
 
 ## 🙏 Acknowledgments
 

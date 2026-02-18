@@ -1,4 +1,4 @@
-name: Build and Release Printing Service
+name: Build and Release Tame Print Service
 
 on:
   push:
