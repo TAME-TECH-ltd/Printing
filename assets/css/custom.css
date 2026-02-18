@@ -389,6 +389,7 @@ button:disabled {
 }
 
 .url-section,
+.socket-debug-section,
 .add-section,
 .printers-section,
 .printer-form-section {
@@ -405,6 +406,111 @@ button:disabled {
 
 .url-section.collapsed {
   padding-bottom: 10px;
+}
+
+.socket-debug-section {
+  padding: 10px 12px;
+}
+
+.socket-debug-section.collapsed {
+  padding-bottom: 10px;
+}
+
+.socket-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.socket-state-pill {
+  min-width: 98px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: #1f242e;
+  font-size: var(--fs-11);
+  font-weight: 600;
+  text-align: center;
+  letter-spacing: 0.2px;
+}
+
+.socket-state-pill.connected {
+  color: #90e0b7;
+  border-color: rgba(45, 193, 126, 0.5);
+  background: rgba(45, 193, 126, 0.12);
+}
+
+.socket-state-pill.connecting {
+  color: #8ec7ff;
+  border-color: rgba(76, 168, 255, 0.5);
+  background: rgba(76, 168, 255, 0.13);
+}
+
+.socket-state-pill.disconnected {
+  color: #f0c674;
+  border-color: rgba(242, 181, 68, 0.5);
+  background: rgba(242, 181, 68, 0.1);
+}
+
+.socket-state-pill.error {
+  color: #ff9ca6;
+  border-color: rgba(235, 91, 106, 0.5);
+  background: rgba(235, 91, 106, 0.12);
+}
+
+.socket-debug-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.socket-log-list {
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: #1d222d;
+}
+
+.socket-log-empty {
+  padding: 10px;
+  color: var(--text-muted);
+  font-size: var(--fs-12);
+}
+
+.socket-log-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.socket-log-item:first-child {
+  border-top: 0;
+}
+
+.socket-log-time {
+  flex-shrink: 0;
+  width: 66px;
+  color: var(--text-muted);
+  font-size: var(--fs-11);
+  font-family: "Consolas", "Menlo", monospace;
+}
+
+.socket-log-text {
+  color: var(--text-secondary);
+  font-size: var(--fs-12);
+  word-break: break-word;
+}
+
+.socket-log-event .socket-log-text {
+  color: #99d9ff;
+}
+
+.socket-log-error .socket-log-text {
+  color: #ffb0b8;
 }
 
 .section-header {

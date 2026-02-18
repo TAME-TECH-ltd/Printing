@@ -1,67 +1,6 @@
-import Echo from "laravel-echo";
-import Pusher from "pusher-js";
+import Echo from "./node_modules/laravel-echo/dist/echo.js";
 
-if (typeof window !== "undefined") {
-  window.Pusher = Pusher;
-} else {
-  global.Pusher = Pusher;
-}
-
-const isElectron = typeof window !== "undefined" && window.electronAPI;
-
-const config = isElectron
-  ? window.electronAPI.getBroadcastConfig()
-  : {
-      VITE_REVERB_HOST: import.meta.env.VITE_REVERB_HOST || "localhost",
-      VITE_REVERB_PORT: import.meta.env.VITE_REVERB_PORT || "8080",
-      VITE_REVERB_APP_KEY: import.meta.env.VITE_REVERB_APP_KEY,
-      VITE_REVERB_SCHEME: import.meta.env.VITE_REVERB_SCHEME || "http",
-      VITE_APP_ENV: import.meta.env.VITE_APP_ENV || "development",
-      VITE_AUTH_ENDPOINT: import.meta.env.VITE_AUTH_ENDPOINT,
-    };
-
-const wsHost = config.VITE_REVERB_HOST;
-const isProd = config.VITE_APP_ENV === "production";
-const forceTLS = config.VITE_REVERB_SCHEME === "https";
-const wsPort = isProd ? "" : config.VITE_REVERB_PORT;
-
-export const echo = new Echo({
-  broadcaster: "pusher",
-  key: config.VITE_REVERB_APP_KEY,
-  wsHost,
-  wsPort,
-  wssPort: forceTLS ? 443 : wsPort,
-  forceTLS,
-  enabledTransports: forceTLS ? ["wss"] : ["ws"],
-  cluster: "mt1",
-  disableStats: true,
-  authorizer: (channel, options) => {
-    return {
-      authorize: (socketId, callback) => {
-        const authEndpoint =
-          config.VITE_AUTH_ENDPOINT ||
-          `${forceTLS ? "https" : "http"}://${wsHost}/broadcasting/auth`;
-
-        fetch(authEndpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          credentials: "include",
-          body: JSON.stringify({
-            socket_id: socketId,
-            channel_name: channel.name,
-          }),
-        })
-          .then((response) => response.json())
-          .then((data) => callback(null, data))
-          .catch((error) => callback(error));
-      },
-    };
-  },
-});
-
+let echoInstance = null;
 const listeners = new Map();
 
 function normalizeEvent(eventName) {
@@ -72,14 +11,110 @@ function tenantChannelName(tenantId, channel) {
   return `tenant.${tenantId}.${channel}`;
 }
 
+function parseBaseUrl(baseUrl) {
+  try {
+    return new URL(baseUrl);
+  } catch {
+    return null;
+  }
+}
+
+function resolveEchoConfig(options = {}) {
+  const parsedUrl = parseBaseUrl(options.baseUrl || "");
+  const scheme =
+    options.scheme || parsedUrl?.protocol?.replace(":", "") || "http";
+  const forceTLS = scheme === "https";
+  const wsHost = options.wsHost || parsedUrl?.hostname || "localhost";
+  const wsPort = Number(options.wsPort || (forceTLS ? 443 : 6001));
+
+  return {
+    broadcaster: options.broadcaster || "reverb",
+    key: options.key,
+    wsHost,
+    wsPort,
+    wssPort: forceTLS ? 443 : wsPort,
+    forceTLS,
+    authEndpoint:
+      options.authEndpoint ||
+      `${forceTLS ? "https" : "http"}://${wsHost}/broadcasting/auth`,
+  };
+}
+
+export function disconnectEcho() {
+  if (echoInstance) {
+    try {
+      echoInstance.disconnect();
+    } catch (error) {
+      console.error("Echo disconnect failed:", error);
+    }
+  }
+
+  listeners.clear();
+  echoInstance = null;
+}
+
+export function configureEcho(options = {}) {
+  const config = resolveEchoConfig(options);
+
+  if (!config.key) {
+    console.error("Missing websocket key. Echo will not be configured.");
+    return null;
+  }
+
+  if (typeof window === "undefined" || !window.Pusher) {
+    console.error("Pusher is not available on window. Echo cannot connect.");
+    return null;
+  }
+
+  disconnectEcho();
+
+  echoInstance = new Echo({
+    broadcaster: config.broadcaster,
+    key: config.key,
+    wsHost: config.wsHost,
+    wsPort: config.wsPort,
+    wssPort: config.wssPort,
+    forceTLS: config.forceTLS,
+    enabledTransports: config.forceTLS ? ["wss"] : ["ws"],
+    cluster: "mt1",
+    disableStats: true,
+    Pusher: window.Pusher,
+    authorizer: (channel) => {
+      return {
+        authorize: (socketId, callback) => {
+          fetch(config.authEndpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            credentials: "include",
+            body: JSON.stringify({
+              socket_id: socketId,
+              channel_name: channel.name,
+            }),
+          })
+            .then((response) => response.json())
+            .then((data) => callback(null, data))
+            .catch((error) => callback(error));
+        },
+      };
+    },
+  });
+
+  return echoInstance;
+}
+
 export function listenTenantChannel(tenantId, channel, eventName, callback) {
+  if (!echoInstance || !tenantId) return;
+
   const channelName = tenantChannelName(tenantId, channel);
   const event = normalizeEvent(eventName);
   const key = `${channelName}:${event}`;
 
   if (listeners.has(key)) return;
 
-  const echoChannel = echo.channel(channelName);
+  const echoChannel = echoInstance.channel(channelName);
   echoChannel.listen(event, callback);
 
   listeners.set(key, {
@@ -90,6 +125,8 @@ export function listenTenantChannel(tenantId, channel, eventName, callback) {
 }
 
 export function stopListeningTenantEvent(tenantId, channel, eventName) {
+  if (!echoInstance || !tenantId) return;
+
   const channelName = tenantChannelName(tenantId, channel);
   const event = normalizeEvent(eventName);
   const key = `${channelName}:${event}`;
@@ -97,22 +134,28 @@ export function stopListeningTenantEvent(tenantId, channel, eventName) {
   const entry = listeners.get(key);
   if (!entry) return;
 
-  echo.channel(channelName).stopListening(event, entry.callback);
+  echoInstance.channel(channelName).stopListening(event, entry.callback);
   listeners.delete(key);
 }
 
 export function stopListeningTenantChannel(tenantId, channel) {
+  if (!echoInstance || !tenantId) return;
+
   const channelName = tenantChannelName(tenantId, channel);
 
   for (const [key, entry] of listeners.entries()) {
     if (entry.channelName === channelName) {
-      echo.channel(channelName).stopListening(entry.event, entry.callback);
+      echoInstance
+        .channel(channelName)
+        .stopListening(entry.event, entry.callback);
       listeners.delete(key);
     }
   }
 }
 
 export function leaveTenantChannel(tenantId, channel) {
+  if (!echoInstance || !tenantId) return;
+
   stopListeningTenantChannel(tenantId, channel);
-  echo.leave(tenantChannelName(tenantId, channel));
+  echoInstance.leave(tenantChannelName(tenantId, channel));
 }

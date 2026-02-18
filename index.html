@@ -43,8 +43,9 @@
             </div>
             <div class="form-group">
               <button
-                type="submit"
+                type="button"
                 class="btn btn-primary btn-block"
+                @click="handleLogin"
                 :disabled="isAuthenticating || !password"
               >
                 <span v-if="isAuthenticating">Signing in...</span>
@@ -225,6 +226,63 @@
                     placeholder="e.g. 875773664"
                   />
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Socket Debug -->
+        <div class="socket-debug-section" :class="{ collapsed: !showDebugPanel }">
+          <div class="section-header" @click="toggleDebugPanel">
+            <h2 class="section-title">Socket Debug</h2>
+            <div class="socket-header-actions">
+              <span
+                class="socket-state-pill"
+                :class="socketConnectionState.toLowerCase()"
+              >
+                {{ socketConnectionState }}
+              </span>
+              <button
+                type="button"
+                class="toggle-btn"
+                :class="{ expanded: showDebugPanel }"
+                aria-label="Toggle socket debug"
+              >
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M6 9L12 15L18 9"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="section-content" v-show="showDebugPanel">
+            <div class="socket-debug-actions">
+              <button type="button" class="btn btn-secondary" @click.stop="connectRealtime">
+                Reconnect
+              </button>
+              <button type="button" class="btn btn-secondary" @click.stop="clearSocketLogs">
+                Clear Logs
+              </button>
+            </div>
+
+            <div class="socket-log-list">
+              <div v-if="!socketLogs.length" class="socket-log-empty">
+                No socket events yet.
+              </div>
+              <div
+                v-for="entry in socketLogs"
+                :key="entry.id"
+                class="socket-log-item"
+                :class="'socket-log-' + entry.type"
+              >
+                <span class="socket-log-time">{{ entry.timestamp }}</span>
+                <span class="socket-log-text">{{ entry.message }}</span>
               </div>
             </div>
           </div>
@@ -509,6 +567,7 @@
       </div>
     </div>
 
+    <script src="./node_modules/pusher-js/dist/web/pusher.min.js"></script>
     <script type="module" defer src="./app.js"></script>
   </body>
 </html>

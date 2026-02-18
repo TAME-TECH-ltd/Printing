@@ -1,3 +1,11 @@
+import {
+  configureEcho,
+  disconnectEcho,
+  listenTenantChannel,
+  leaveTenantChannel,
+  stopListeningTenantEvent,
+} from "./echo.js";
+
 const {
   createApp,
   ref,
@@ -108,36 +116,54 @@ const useApiClient = () => {
 
 const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
   const isFetching = ref(false);
-  const fetchInterval = ref(null);
   const isActive = ref(false);
+  const pendingMeta = ref(null);
+  const retryTimeout = ref(null);
 
-  const startFetching = (meta = null) => {
-    if (!isActive.value) return;
+  const clearRetryTimeout = () => {
+    if (retryTimeout.value) {
+      clearTimeout(retryTimeout.value);
+      retryTimeout.value = null;
+    }
+  };
 
+  const buildRoundsUrl = (meta = null) => {
     const roundsUrl = url.value ? "next-printable-round" : null;
-    if (!roundsUrl || !activePrinters.value.length) return;
+    if (!roundsUrl || !activePrinters.value.length) return null;
 
-    let _url = url.value
-      ? outletCode.value
-        ? addBkendIfProduction(
-            url.value,
-            `/api/${roundsUrl}/${outletCode.value}`,
-          )
-        : addBkendIfProduction(url.value, `/api/${roundsUrl}`)
-      : null;
+    let nextUrl = outletCode.value
+      ? addBkendIfProduction(url.value, `/api/${roundsUrl}/${outletCode.value}`)
+      : addBkendIfProduction(url.value, `/api/${roundsUrl}`);
+
     if (meta) {
       const filters = {};
       if (meta.latest) filters.latest = meta.latest;
       if (meta.content) filters.content = meta.content;
-      _url = encodeQuery(_url, filters);
+      nextUrl = encodeQuery(nextUrl, filters);
     }
 
+    return nextUrl;
+  };
+
+  const queueFetch = (meta = null) => {
+    if (!isActive.value) return;
+
+    if (isFetching.value) {
+      pendingMeta.value = meta;
+      return;
+    }
+
+    const nextUrl = buildRoundsUrl(meta);
+    if (!nextUrl) return;
+
+    clearRetryTimeout();
     isFetching.value = true;
 
     axios
-      .get(_url)
+      .get(nextUrl)
       .then((response) => {
         const { status, round, order, items } = response.data;
+
         if (status) {
           const printer = activePrinters.value[0];
           if (printer) {
@@ -148,9 +174,9 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
               interface: printer.interface,
               port: printer.port,
               ip: printer.ip,
-              round: round,
-              items: items,
-              order: order,
+              round,
+              items,
+              order,
               settings: { ...appSettings.value },
               content: _content.join(""),
             };
@@ -158,51 +184,55 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
               console.error("Print error:", error);
             });
           }
-        } else {
-          if (round) {
-            axios.get(
-              `${url.value}/bkend/api/update-printed-round/${round.id}`,
-            );
-          }
-          scheduleNextFetch(meta);
+          return;
+        }
+
+        if (round) {
+          axios
+            .get(
+              addBkendIfProduction(
+                url.value,
+                `/api/update-printed-round/${round.id}`,
+              ),
+            )
+            .finally(() => {
+              queueFetch(meta);
+            });
         }
       })
       .catch(() => {
-        isFetching.value = false;
-        scheduleNextFetch(meta, 3000);
+        clearRetryTimeout();
+        retryTimeout.value = setTimeout(() => {
+          if (isActive.value) {
+            queueFetch(meta);
+          }
+        }, 3000);
       })
       .finally(() => {
         isFetching.value = false;
-      });
-  };
 
-  const scheduleNextFetch = (meta = null, delay = 2000) => {
-    if (fetchInterval.value) {
-      clearTimeout(fetchInterval.value);
-    }
-    fetchInterval.value = setTimeout(() => {
-      if (isActive.value) {
-        startFetching(meta);
-      }
-    }, delay);
+        if (pendingMeta.value !== null) {
+          const nextMeta = pendingMeta.value;
+          pendingMeta.value = null;
+          queueFetch(nextMeta);
+        }
+      });
   };
 
   const stopFetching = () => {
     isActive.value = false;
-    if (fetchInterval.value) {
-      clearTimeout(fetchInterval.value);
-      fetchInterval.value = null;
-    }
+    pendingMeta.value = null;
+    clearRetryTimeout();
   };
 
   const resumeFetching = (meta = null) => {
     isActive.value = true;
-    startFetching(meta);
+    queueFetch(meta);
   };
 
   return {
     isFetching,
-    startFetching,
+    startFetching: queueFetch,
     stopFetching,
     resumeFetching,
   };
@@ -252,6 +282,7 @@ const App = {
     const activePrinters = ref([]);
     const url = ref("");
     const outletCode = ref(""); // New outlet code variable
+    const tenantId = ref(null);
     const password = ref("");
     const invalidPassword = ref(false);
     const isAuthenticating = ref(false);
@@ -261,6 +292,9 @@ const App = {
     const isDeletingPrinter = ref(false);
     const systemInfo = ref(null);
     const showSystemInfo = ref(false);
+    const showDebugPanel = ref(false);
+    const socketConnectionState = ref("DISCONNECTED");
+    const socketLogs = ref([]);
 
     const selectedPrinter = ref("");
     const selectedPrinterId = ref(null);
@@ -289,6 +323,148 @@ const App = {
     const roundsUrl = computed(() => {
       return url.value ? "next-printable-round" : null;
     });
+
+    const REALTIME_CHANNEL = "pos.printing";
+    const REALTIME_EVENT = "pos.round.created";
+    const SOCKET_LOG_LIMIT = 40;
+
+    const pushSocketLog = (type, message) => {
+      const timestamp = new Date().toLocaleTimeString("en-US", {
+        hour12: false,
+      });
+
+      socketLogs.value.unshift({
+        id: Date.now() + "-" + Math.random().toString(16).slice(2, 8),
+        timestamp,
+        type,
+        message,
+      });
+
+      if (socketLogs.value.length > SOCKET_LOG_LIMIT) {
+        socketLogs.value.length = SOCKET_LOG_LIMIT;
+      }
+    };
+
+    const setSocketState = (state, reason = null) => {
+      socketConnectionState.value = state;
+      pushSocketLog(
+        state.toLowerCase(),
+        reason ? state + ": " + reason : state,
+      );
+    };
+
+    const clearSocketLogs = () => {
+      socketLogs.value = [];
+    };
+
+    const toggleDebugPanel = () => {
+      showDebugPanel.value = !showDebugPanel.value;
+    };
+
+    const disconnectRealtime = () => {
+      if (tenantId.value) {
+        stopListeningTenantEvent(
+          tenantId.value,
+          REALTIME_CHANNEL,
+          REALTIME_EVENT,
+        );
+        leaveTenantChannel(tenantId.value, REALTIME_CHANNEL);
+        tenantId.value = null;
+      }
+
+      disconnectEcho();
+      setSocketState("DISCONNECTED");
+    };
+
+    const connectRealtime = async () => {
+      if (!url.value || !activePrinters.value.length) {
+        setSocketState("DISCONNECTED", "missing URL or printer configuration");
+        return;
+      }
+
+      disconnectRealtime();
+      setSocketState("CONNECTING");
+
+      try {
+        const responses = await Promise.all([
+          axios.get(addBkendIfProduction(url.value, "/api/tenant-context")),
+          axios.get(addBkendIfProduction(url.value, "/api/realtime-config")),
+        ]);
+
+        const tenantResponse = responses[0];
+        const realtimeResponse = responses[1];
+        const currentTenantId = tenantResponse && tenantResponse.data ? tenantResponse.data.tenant_id : null;
+        const realtimeConfig = realtimeResponse && realtimeResponse.data ? realtimeResponse.data : {};
+
+        if (!currentTenantId || !realtimeConfig.key) {
+          setSocketState("ERROR", "missing tenant or realtime key");
+          return;
+        }
+
+        const echo = configureEcho({
+          broadcaster: realtimeConfig.broadcaster || "reverb",
+          baseUrl: url.value,
+          key: realtimeConfig.key,
+          wsHost: realtimeConfig.host,
+          wsPort: realtimeConfig.port,
+          scheme: realtimeConfig.scheme,
+        });
+
+        if (!echo) {
+          setSocketState("ERROR", "failed to initialize Echo client");
+          return;
+        }
+
+        const connection = echo.connector && echo.connector.pusher
+          ? echo.connector.pusher.connection
+          : null;
+
+        if (connection && typeof connection.bind === "function") {
+          connection.bind("connected", () => {
+            setSocketState("CONNECTED");
+          });
+
+          connection.bind("disconnected", () => {
+            setSocketState("DISCONNECTED", "connection closed");
+          });
+
+          connection.bind("error", (error) => {
+            const errorMessage =
+              (error && error.error && error.error.data && error.error.data.message) ||
+              (error && error.data && error.data.message) ||
+              (error && error.message) ||
+              "unknown error";
+            setSocketState("ERROR", errorMessage);
+          });
+
+          connection.bind("state_change", (states) => {
+            const previous = states && states.previous ? states.previous : "unknown";
+            const current = states && states.current ? states.current : "unknown";
+            pushSocketLog("state_change", "state " + previous + " -> " + current);
+          });
+        }
+
+        tenantId.value = String(currentTenantId);
+
+        listenTenantChannel(
+          tenantId.value,
+          REALTIME_CHANNEL,
+          REALTIME_EVENT,
+          () => {
+            pushSocketLog("event", "received " + REALTIME_EVENT);
+            resumeFetching();
+          },
+        );
+
+        pushSocketLog(
+          "subscribed",
+          "listening on tenant." + tenantId.value + "." + REALTIME_CHANNEL,
+        );
+      } catch (error) {
+        console.error("Failed to connect realtime printing:", error);
+        setSocketState("ERROR", (error && error.message) || "connection failed");
+      }
+    };
 
     const eventHandlers = {
       printersList: (_printers) => {
@@ -338,7 +514,14 @@ const App = {
           type: "success",
           text: "Database updated successfully",
         });
-        resumeFetching();
+
+        if (activePrinters.value.length) {
+          connectRealtime();
+          resumeFetching();
+        } else {
+          disconnectRealtime();
+          stopFetching();
+        }
       },
 
       availableSettings: (data) => {
@@ -359,7 +542,11 @@ const App = {
             .then((response) => {
               appSettings.value = response?.data?.company;
               if (activePrinters.value.length) {
+                connectRealtime();
                 resumeFetching();
+              } else {
+                disconnectRealtime();
+                stopFetching();
               }
             })
             .catch((error) => {
@@ -399,16 +586,13 @@ const App = {
     });
 
     onMounted(() => {
-      isAuthenticated.value = false; // Always skip login for now
-      console.log(
-        "Tame Print Service loaded. Login skipped for development mode.",
-      );
-      window.electronAPI.send("authenticated");
-
+      isAuthenticated.value = false;
+      console.log("Tame Print Service loaded. Waiting for login.");
       loadSystemInfo();
     });
 
     onUnmounted(() => {
+      disconnectRealtime();
       stopFetching();
       cleanupEventListeners();
       clearMessage();
@@ -529,6 +713,7 @@ const App = {
     };
 
     const handleLogin = () => {
+      console.log("Login button clicked");
       if (!password.value) {
         toggleFlashMessage({
           type: "warning",
@@ -661,10 +846,13 @@ const App = {
       isAuthenticating,
       isAuthenticated,
       showApiConfig,
+      showDebugPanel,
       isSavingPrinter,
       isDeletingPrinter,
       systemInfo,
       showSystemInfo,
+      socketConnectionState,
+      socketLogs,
       outletCode,
 
       selectedPrinter,
@@ -699,8 +887,11 @@ const App = {
       handleLogout,
       testConnection,
       toggleApiConfig,
+      toggleDebugPanel,
       toggleSystemInfo,
       loadSystemInfo,
+      connectRealtime,
+      clearSocketLogs,
       startFetching,
       stopFetching,
       resumeFetching,
