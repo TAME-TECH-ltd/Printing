@@ -14,6 +14,18 @@ const dbFilePath = path.join(userDataPath, "printing.sqlite");
 console.log("Database path:", dbFilePath);
 
 let db;
+const activePrinterProcessors = new Set();
+const printQueueTimers = new Map();
+
+const PRINT_JOB_STATUS = {
+  PENDING: "pending",
+  PROCESSING: "processing",
+  COMPLETED: "completed",
+};
+
+const PRINT_QUEUE_BASE_DELAY_MS = 3000;
+const PRINT_QUEUE_MAX_DELAY_MS = 60000;
+const PRINT_EXECUTION_TIMEOUT_MS = 20000;
 
 function initializeDatabase() {
   try {
@@ -48,6 +60,29 @@ function initializeDatabase() {
       );
     `);
 
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS print_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        round_id INTEGER,
+        printer_key TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_retry_at TEXT,
+        locked_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_print_jobs_status_retry
+      ON print_jobs (status, next_retry_at, created_at);
+    `);
+
+    recoverInterruptedPrintJobs();
+
     const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get();
     if (userCount.count === 0) {
       db.prepare("INSERT INTO users (username, password) VALUES (?, ?)").run(
@@ -63,6 +98,548 @@ function initializeDatabase() {
     console.error("Database initialization error:", error);
     throw error;
   }
+}
+
+function nowIsoString() {
+  return new Date().toISOString();
+}
+
+function buildPrinterKey(data = {}) {
+  if (data.printerId) {
+    return `printer:${data.printerId}`;
+  }
+
+  return [
+    data.printer || "",
+    data.interface || "",
+    data.ip || "",
+    data.port || "",
+    data.content || "",
+  ].join("|");
+}
+
+function buildPrintedMeta(data = {}) {
+  return {
+    latest: data?.round?.id,
+    ...(data?.printerId ? { printerId: data.printerId } : {}),
+    ...(data?.printerKey ? { printerKey: data.printerKey } : {}),
+    ...(data?.content ? { content: data.content } : {}),
+  };
+}
+
+function recoverInterruptedPrintJobs() {
+  if (!db) return;
+
+  const now = nowIsoString();
+  db.prepare(
+    `
+      UPDATE print_jobs
+      SET status = ?, locked_at = NULL, next_retry_at = COALESCE(next_retry_at, ?), updated_at = ?
+      WHERE status = ?
+    `,
+  ).run(
+    PRINT_JOB_STATUS.PENDING,
+    now,
+    now,
+    PRINT_JOB_STATUS.PROCESSING,
+  );
+}
+
+function clearPrintQueueTimer(printerKey) {
+  const timer = printQueueTimers.get(printerKey);
+  if (timer) {
+    clearTimeout(timer);
+    printQueueTimers.delete(printerKey);
+  }
+}
+
+function schedulePrintQueue(printerKey, delay = 0) {
+  if (!printerKey) return;
+
+  clearPrintQueueTimer(printerKey);
+
+  const timer = setTimeout(() => {
+    printQueueTimers.delete(printerKey);
+    processPrintQueue(printerKey).catch((error) => {
+      console.error("Print queue processing failed:", error);
+      schedulePrintQueue(printerKey, PRINT_QUEUE_BASE_DELAY_MS);
+    });
+  }, delay);
+
+  printQueueTimers.set(printerKey, timer);
+}
+
+function scheduleAllPrintQueues() {
+  if (!db) return;
+
+  const printerKeys = db
+    .prepare(
+      `
+        SELECT DISTINCT printer_key
+        FROM print_jobs
+        WHERE status IN (?, ?)
+      `,
+    )
+    .all(PRINT_JOB_STATUS.PENDING, PRINT_JOB_STATUS.PROCESSING);
+
+  printerKeys.forEach((row) => {
+    if (row?.printer_key) {
+      schedulePrintQueue(row.printer_key, 0);
+    }
+  });
+}
+
+function computeRetryDelayMs(attempts) {
+  const normalizedAttempts = Math.max(1, Number(attempts) || 1);
+  return Math.min(
+    PRINT_QUEUE_BASE_DELAY_MS * Math.pow(2, normalizedAttempts - 1),
+    PRINT_QUEUE_MAX_DELAY_MS,
+  );
+}
+
+function truncateErrorMessage(error) {
+  const message =
+    error instanceof Error ? error.message : String(error || "Unknown error");
+  return message.slice(0, 1000);
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    }),
+  ]);
+}
+
+function enqueuePrintJob(data = {}) {
+  if (!db) {
+    throw new Error("Database is not initialized");
+  }
+
+  const roundId = Number(data?.round?.id) || null;
+  const printerKey = buildPrinterKey(data);
+  const now = nowIsoString();
+  const payload = JSON.stringify({
+    ...data,
+    printerKey,
+  });
+
+  if (roundId) {
+    const completedJob = db
+      .prepare(
+        `
+          SELECT id
+          FROM print_jobs
+          WHERE round_id = ? AND printer_key = ? AND status = ?
+          ORDER BY id DESC
+          LIMIT 1
+        `,
+      )
+      .get(roundId, printerKey, PRINT_JOB_STATUS.COMPLETED);
+
+    if (completedJob) {
+      setTimeout(() => {
+        mainWindow?.webContents.send("printedContent", buildPrintedMeta(data));
+      }, 0);
+
+      return {
+        success: true,
+        queued: false,
+        deduplicated: true,
+        jobId: completedJob.id,
+      };
+    }
+
+    const existingJob = db
+      .prepare(
+        `
+          SELECT id
+          FROM print_jobs
+          WHERE round_id = ? AND printer_key = ? AND status IN (?, ?)
+          ORDER BY id DESC
+          LIMIT 1
+        `,
+      )
+      .get(
+        roundId,
+        printerKey,
+        PRINT_JOB_STATUS.PENDING,
+        PRINT_JOB_STATUS.PROCESSING,
+      );
+
+    if (existingJob) {
+      db.prepare(
+        `
+          UPDATE print_jobs
+          SET payload = ?, updated_at = ?
+          WHERE id = ?
+        `,
+      ).run(payload, now, existingJob.id);
+
+      schedulePrintQueue(printerKey, 0);
+
+      return { success: true, queued: false, jobId: existingJob.id };
+    }
+  }
+
+  const result = db
+    .prepare(
+      `
+        INSERT INTO print_jobs (
+          round_id,
+          printer_key,
+          payload,
+          status,
+          attempts,
+          next_retry_at,
+          created_at,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+      `,
+    )
+    .run(
+      roundId,
+      printerKey,
+      payload,
+      PRINT_JOB_STATUS.PENDING,
+      now,
+      now,
+      now,
+    );
+
+  schedulePrintQueue(printerKey, 0);
+
+  return {
+    success: true,
+    queued: true,
+    jobId: result.lastInsertRowid,
+  };
+}
+
+function getNextQueuedPrintJob(printerKey, includeFuture = false) {
+  if (!db) return null;
+
+  const dueFilter = includeFuture
+    ? ""
+    : "AND (next_retry_at IS NULL OR next_retry_at <= ?)";
+  const params = includeFuture
+    ? [PRINT_JOB_STATUS.PENDING, printerKey]
+    : [PRINT_JOB_STATUS.PENDING, printerKey, nowIsoString()];
+
+  return db
+    .prepare(
+      `
+        SELECT *
+        FROM print_jobs
+        WHERE status = ?
+          AND printer_key = ?
+          ${dueFilter}
+        ORDER BY COALESCE(datetime(next_retry_at), datetime(created_at)) ASC, id ASC
+        LIMIT 1
+      `,
+    )
+    .get(...params);
+}
+
+function markPrintJobProcessing(jobId) {
+  const now = nowIsoString();
+  db.prepare(
+    `
+      UPDATE print_jobs
+      SET status = ?, locked_at = ?, updated_at = ?
+      WHERE id = ?
+    `,
+  ).run(PRINT_JOB_STATUS.PROCESSING, now, now, jobId);
+}
+
+function markPrintJobCompleted(jobId) {
+  const now = nowIsoString();
+  db.prepare(
+    `
+      UPDATE print_jobs
+      SET status = ?, locked_at = NULL, updated_at = ?, next_retry_at = NULL
+      WHERE id = ?
+    `,
+  ).run(PRINT_JOB_STATUS.COMPLETED, now, jobId);
+}
+
+function markPrintJobForRetry(job, error) {
+  const now = nowIsoString();
+  const attempts = Number(job?.attempts || 0) + 1;
+  const retryDelayMs = computeRetryDelayMs(attempts);
+  const retryAt = new Date(Date.now() + retryDelayMs).toISOString();
+  const message = truncateErrorMessage(error);
+
+  db.prepare(
+    `
+      UPDATE print_jobs
+      SET status = ?, attempts = ?, last_error = ?, locked_at = NULL, next_retry_at = ?, updated_at = ?
+      WHERE id = ?
+    `,
+  ).run(
+    PRINT_JOB_STATUS.PENDING,
+    attempts,
+    message,
+    retryAt,
+    now,
+    job.id,
+  );
+
+  if (attempts === 1 || attempts % 5 === 0) {
+    mainWindow?.webContents.send("print-error", {
+      message: `Print failed. Retrying in ${Math.round(retryDelayMs / 1000)}s.`,
+      attempts,
+      roundId: job?.round_id || null,
+    });
+  }
+
+  return retryDelayMs;
+}
+
+function getRetryDelayUntil(nextRetryAt) {
+  if (!nextRetryAt) return 0;
+  const nextTimestamp = new Date(nextRetryAt).getTime();
+  if (Number.isNaN(nextTimestamp)) return 0;
+  return Math.max(0, nextTimestamp - Date.now());
+}
+
+async function processPrintQueue(printerKey) {
+  if (!db || !printerKey || activePrinterProcessors.has(printerKey)) return;
+
+  const job = getNextQueuedPrintJob(printerKey);
+  if (!job) {
+    const futureJob = getNextQueuedPrintJob(printerKey, true);
+    if (futureJob) {
+      schedulePrintQueue(printerKey, getRetryDelayUntil(futureJob.next_retry_at));
+    }
+    return;
+  }
+
+  activePrinterProcessors.add(printerKey);
+  markPrintJobProcessing(job.id);
+
+  try {
+    const payload = JSON.parse(job.payload);
+    await performPrintJob(payload);
+    markPrintJobCompleted(job.id);
+    schedulePrintQueue(printerKey, 0);
+  } catch (error) {
+    console.error("Print job failed:", error);
+    const retryDelayMs = markPrintJobForRetry(job, error);
+    schedulePrintQueue(printerKey, retryDelayMs);
+  } finally {
+    activePrinterProcessors.delete(printerKey);
+  }
+}
+
+async function performPrintJob(data) {
+  const options = {
+    type: PrinterTypes[data.type],
+    characterSet: CharacterSet.PC852_LATIN2,
+    removeSpecialCharacters: false,
+    breakLine: BreakLine.WORD,
+    options: {
+      timeout: 10000,
+    },
+  };
+
+  if (data.ip) {
+    options.interface = `tcp://${data.ip}`;
+  } else {
+    options.interface = `//localhost/${data.port}`;
+  }
+
+  const printer = new ThermalPrinter(options);
+  const isConnected = await withTimeout(
+    printer.isPrinterConnected(),
+    PRINT_EXECUTION_TIMEOUT_MS,
+    "Printer connection check",
+  );
+
+  if (!isConnected) {
+    throw new Error("Printer is not connected");
+  }
+
+  printer.alignCenter();
+  printer.setTypeFontA();
+  printer.setTextDoubleHeight();
+  printer.setTextDoubleWidth();
+  printer.println(data?.settings?.site_name);
+  printer.setTextNormal();
+  printer.println(`TIN: ${data?.settings?.app_tin}`);
+  printer.println(`Tel: ${data?.settings?.app_phone}`);
+  printer.println(`Email: ${data?.settings?.app_email}`);
+  printer.println(`Address: ${data?.settings?.site_address}`);
+  printer.drawLine();
+  printer.alignLeft();
+
+  const isReceipt = data?.order?.ebm_meta || data?.round?.origin === "RETAIL";
+  if (data?.round?.category === "ORDER") {
+    printer.println(
+      `Order #: ${helper.generateVoucherNo(data?.round?.round_no)}(${
+        data?.round?.destination
+      })`,
+    );
+  } else if (data?.round?.category === "INVOICE") {
+    printer.println(
+      `${isReceipt ? "RECEIPT" : "INVOICE"} #: ${helper.generateVoucherNo(
+        data?.order?.id,
+      )}`,
+    );
+  } else {
+    printer.println(
+      `\x1B\x45\x01Round Slip #\x1B\x45\x00: ${helper.generateVoucherNo(
+        data?.round?.round_no,
+      )}`,
+    );
+  }
+  printer.println(`Customer: ${data?.order?.client || "Walk-In"}`);
+  if (!isReceipt) {
+    printer.tableCustom([
+      {
+        text: `Served By: ${data?.order?.waiter}`,
+        align: "LEFT",
+      },
+      { text: `Table No: ${data?.order?.table_name}`, align: "RIGHT" },
+    ]);
+  }
+
+  printer.tableCustom([
+    {
+      text: `Date: ${helper.formatDate(data?.order?.system_date)}`,
+      align: "LEFT",
+    },
+    {
+      text: `Time: ${helper.formatTime(data?.order?.order_time)}`,
+      align: "RIGHT",
+    },
+  ]);
+
+  printer.drawLine();
+
+  printer.tableCustom([
+    { text: "Item", align: "LEFT", width: 0.5, bold: true },
+    { text: "Qty", align: "CENTER", width: 0.1, bold: true },
+    { text: "Price", align: "CENTER", width: 0.18, bold: true },
+    { text: "Total", align: "RIGHT", width: 0.22, bold: true },
+  ]);
+
+  printer.drawLine();
+
+  data?.items.forEach((item) => {
+    printer.tableCustom([
+      { text: item.name, align: "LEFT", width: 0.5 },
+      { text: item.quantity, align: "CENTER", width: 0.1 },
+      { text: helper.formatMoney(item.price), align: "CENTER", width: 0.18 },
+      { text: helper.formatMoney(item.amount), align: "RIGHT", width: 0.22 },
+    ]);
+    if (item?.comment && data?.round?.category === "ORDER") {
+      printer.setTypeFontB();
+      printer.tableCustom([
+        {
+          text: `\x1B\x45\x01Notes: \x1B\x45\x00${item.comment}`,
+          align: "LEFT",
+          width: 1,
+        },
+      ]);
+      printer.setTypeFontA();
+    }
+  });
+
+  printer.drawLine();
+
+  if (data?.round?.category === "INVOICE") {
+    if (data?.order?.ebm_meta) {
+      const totals = [
+        ["Total Rwf", `${data?.order?.grand_total}`],
+        ["Total A-EX Rwf", `0.00`],
+        ["Total B-18% Rwf", `${data?.order?.total_taxes}`],
+        ["Total D", `0.00`],
+        ["Total Tax Rwf", `${data?.order?.total_taxes}`],
+      ];
+
+      totals.forEach((item) => {
+        printer.tableCustom([
+          { text: item[0], align: "LEFT" },
+          { text: item[1], align: "RIGHT" },
+        ]);
+      });
+
+      printer.drawLine();
+      const invoiceMeta = data?.order?.ebm_meta;
+      printer.newLine();
+      printer.bold(true);
+      printer.print("SDC INFORMATION");
+      printer.bold(false);
+      printer.newLine();
+      printer.setTextNormal();
+      printer.drawLine();
+      printer.println(
+        `Date: ${helper.formateEbmDate(invoiceMeta.vsdcRcptPbctDate)}`,
+      );
+      printer.println(`SDC ID: ${invoiceMeta.sdcId}`);
+      printer.println(`Internal Data: ${invoiceMeta.intrlData}`);
+      printer.println(`Receipt Signature: ${invoiceMeta.rcptSign}`);
+      printer.println(`MRC: ${invoiceMeta.mrcNo}`);
+      printer.newLine();
+      printer.alignCenter();
+      printer.printQR(
+        `https://myrra.rra.gov.rw/common/link/ebm/receipt/indexEbmReceiptData?Data=${invoiceMeta.rcptSign}`,
+        {
+          cellSize: 3,
+          correction: "Q",
+        },
+      );
+      printer.println(`Powered by EBM v2.1`);
+    } else {
+      printer.alignRight();
+      printer.setTextDoubleWidth();
+      printer.println(`Total: ${helper.formatMoney(data?.order?.grand_total)}`);
+      printer.setTextNormal();
+      printer.drawLine();
+      printer.alignCenter();
+      printer.print(`Dial `);
+      printer.bold(true);
+      printer.setTextQuadArea();
+      printer.setTypeFontB();
+      printer.print(`${data?.settings?.momo_code}`);
+      printer.bold(false);
+      printer.setTextNormal();
+      printer.setTypeFontA();
+      printer.print(` to pay with MOMO`);
+      printer.newLine();
+      printer.println(
+        `This is not a legal receipt. Please ask your legal receipt.`,
+      );
+      printer.println(`Thank you!`);
+    }
+  } else if (data?.round?.category === "ROUND_SLIP") {
+    const total = data?.items?.reduce((a, b) => a + Number(b.amount), 0);
+    printer.alignRight();
+    printer.setTextDoubleWidth();
+    printer.println(`Total: ${helper.formatMoney(total)}`);
+    printer.setTextNormal();
+    printer.drawLine();
+    printer.alignCenter();
+    printer.println(
+      "This is neither a legal receipt or final invoice. It is just a round total slip.",
+    );
+  }
+
+  printer.cut();
+  printer.beep();
+
+  await withTimeout(
+    printer.execute(),
+    PRINT_EXECUTION_TIMEOUT_MS,
+    "Printer execution",
+  );
+
+  mainWindow?.webContents.send("printedContent", buildPrintedMeta(data));
 }
 
 let mainWindow;
@@ -513,6 +1090,10 @@ app.on("before-quit", async (event) => {
   }
 
   try {
+    Array.from(printQueueTimers.keys()).forEach((printerKey) => {
+      clearPrintQueueTimer(printerKey);
+    });
+
     if (db) {
       db.close();
       console.log("Database connection closed");
@@ -547,6 +1128,7 @@ ipcMain.on("authenticated", async (event) => {
     const settings = db.prepare("SELECT * FROM settings LIMIT 1").get();
     const printers = db.prepare("SELECT * FROM printers").all();
     event.sender.send("availableSettings", { settings, printers }); // settings now always includes outlet_code
+    scheduleAllPrintQueues();
   } catch (error) {
     console.error("Authentication error:", error);
     event.sender.send("auth-error", { message: "Failed to load settings" });
@@ -618,202 +1200,18 @@ ipcMain.handle("get-system-info", async (event) => {
 });
 
 ipcMain.handle("print-content", async (event, data) => {
-  const options = {
-    type: PrinterTypes[data.type], // or PrinterTypes.STAR
-    characterSet: CharacterSet.PC852_LATIN2,
-    removeSpecialCharacters: false,
-    breakLine: BreakLine.WORD,
-    options: {
-      timeout: 5000,
-    },
-  };
-  if (data.ip) {
-    options.interface = `tcp://${data.ip}`;
-  } else {
-    options.interface = `//localhost/${data.port}`;
-  }
-  const printer = new ThermalPrinter(options);
-
   try {
-    await printer.isPrinterConnected();
-    printer.alignCenter();
-    printer.setTypeFontA();
-    printer.setTextDoubleHeight();
-    printer.setTextDoubleWidth();
-    printer.println(data?.settings?.site_name);
-    printer.setTextNormal();
-    printer.println(`TIN: ${data?.settings?.app_tin}`);
-    printer.println(`Tel: ${data?.settings?.app_phone}`);
-    printer.println(`Email: ${data?.settings?.app_email}`);
-    printer.println(`Address: ${data?.settings?.site_address}`);
-    printer.drawLine();
-    printer.alignLeft();
-
-    const isReceipt = data?.order?.ebm_meta || data?.round?.origin === "RETAIL";
-    if (data?.round?.category === "ORDER") {
-      printer.println(
-        `Order #: ${helper.generateVoucherNo(data?.round?.round_no)}(${
-          data?.round?.destination
-        })`,
-      );
-    } else if (data?.round?.category === "INVOICE") {
-      printer.println(
-        `${isReceipt ? "RECEIPT" : "INVOICE"} #: ${helper.generateVoucherNo(
-          data?.order?.id,
-        )}`,
-      );
-    } else {
-      // printer.print(`\x1B\x45\x01${data?.settings?.momo_code}\x1B\x45\x00`);
-      printer.println(
-        `\x1B\x45\x01Round Slip #\x1B\x45\x00: ${helper.generateVoucherNo(
-          data?.round?.round_no,
-        )}`,
-      );
-    }
-    printer.println(`Customer: ${data?.order?.client || "Walk-In"}`);
-    if (!isReceipt) {
-      printer.tableCustom([
-        {
-          text: `Served By: ${data?.order?.waiter}`,
-          align: "LEFT",
-        },
-        { text: `Table No: ${data?.order?.table_name}`, align: "RIGHT" },
-      ]);
+    if (!data?.round?.id) {
+      throw new Error("Missing round id for print job");
     }
 
-    printer.tableCustom([
-      {
-        text: `Date: ${helper.formatDate(data?.order?.system_date)}`,
-        align: "LEFT",
-      },
-      {
-        text: `Time: ${helper.formatTime(data?.order?.order_time)}`,
-        align: "RIGHT",
-      },
-    ]);
-
-    printer.drawLine();
-
-    printer.tableCustom([
-      { text: "Item", align: "LEFT", width: 0.5, bold: true },
-      { text: "Qty", align: "CENTER", width: 0.1, bold: true },
-      { text: "Price", align: "CENTER", width: 0.18, bold: true },
-      { text: "Total", align: "RIGHT", width: 0.22, bold: true },
-    ]);
-
-    printer.drawLine();
-
-    data?.items.forEach((item) => {
-      printer.tableCustom([
-        { text: item.name, align: "LEFT", width: 0.5 },
-        { text: item.quantity, align: "CENTER", width: 0.1 },
-        { text: helper.formatMoney(item.price), align: "CENTER", width: 0.18 },
-        { text: helper.formatMoney(item.amount), align: "RIGHT", width: 0.22 },
-      ]);
-      if (item?.comment && data?.round?.category === "ORDER") {
-        printer.setTypeFontB();
-        printer.tableCustom([
-          {
-            text: `\x1B\x45\x01Notes: \x1B\x45\x00${item.comment}`,
-            align: "LEFT",
-            width: 1,
-          },
-        ]);
-        printer.setTypeFontA();
-      }
-    });
-
-    printer.drawLine();
-
-    if (data?.round?.category === "INVOICE") {
-      if (data?.order?.ebm_meta) {
-        const totals = [
-          ["Total Rwf", `${data?.order?.grand_total}`],
-          ["Total A-EX Rwf", `0.00`],
-          ["Total B-18% Rwf", `${data?.order?.total_taxes}`],
-          ["Total D", `0.00`],
-          ["Total Tax Rwf", `${data?.order?.total_taxes}`],
-        ];
-
-        totals.forEach((item) => {
-          printer.tableCustom([
-            { text: item[0], align: "LEFT" },
-            { text: item[1], align: "RIGHT" },
-          ]);
-        });
-
-        printer.drawLine();
-        const invoiceMeta = data?.order?.ebm_meta;
-        printer.newLine();
-        printer.bold(true);
-        printer.print("SDC INFORMATION");
-        printer.bold(false);
-        printer.newLine();
-        printer.setTextNormal();
-        printer.drawLine();
-        printer.println(
-          `Date: ${helper.formateEbmDate(invoiceMeta.vsdcRcptPbctDate)}`,
-        );
-        printer.println(`SDC ID: ${invoiceMeta.sdcId}`);
-        printer.println(`Internal Data: ${invoiceMeta.intrlData}`);
-        printer.println(`Receipt Signature: ${invoiceMeta.rcptSign}`);
-        printer.println(`MRC: ${invoiceMeta.mrcNo}`);
-        printer.newLine();
-        printer.alignCenter();
-        printer.printQR(
-          `https://myrra.rra.gov.rw/common/link/ebm/receipt/indexEbmReceiptData?Data=${invoiceMeta.rcptSign}`,
-          {
-            cellSize: 3,
-            correction: "Q",
-          },
-        );
-        printer.println(`Powered by EBM v2.1`);
-      } else {
-        printer.alignRight();
-        printer.setTextDoubleWidth();
-        printer.println(
-          `Total: ${helper.formatMoney(data?.order?.grand_total)}`,
-        );
-        printer.setTextNormal();
-        printer.drawLine();
-        printer.alignCenter();
-        printer.print(`Dial `);
-        printer.bold(true);
-        //printer.print(`\x1B\x45\x01${data?.settings?.momo_code}\x1B\x45\x00`);
-        printer.setTextQuadArea();
-        printer.setTypeFontB();
-        printer.print(`${data?.settings?.momo_code}`);
-        printer.bold(false);
-        printer.setTextNormal();
-        printer.setTypeFontA();
-        printer.print(` to pay with MOMO`);
-        printer.newLine();
-        printer.println(
-          `This is not a legal receipt. Please ask your legal receipt.`,
-        );
-        printer.println(`Thank you!`);
-      }
-    } else if (data?.round?.category === "ROUND_SLIP") {
-      const total = data?.items?.reduce((a, b) => a + Number(b.amount), 0);
-      printer.alignRight();
-      printer.setTextDoubleWidth();
-      printer.println(`Total: ${helper.formatMoney(total)}`);
-      printer.setTextNormal();
-      printer.drawLine();
-      printer.alignCenter();
-      printer.println(
-        "This is neither a legal receipt or final invoice. It is just a round total slip.",
-      );
-    }
-    printer.cut();
-    printer.beep();
-    await printer.execute();
-    mainWindow?.webContents.send("printedContent", {
-      latest: data?.round?.id,
-      ...(data?.content ? { content: data.content } : {}),
-    });
+    return enqueuePrintJob(data);
   } catch (error) {
-    mainWindow?.webContents.send("retryPrinting", data);
+    console.error("Failed to queue print job:", error);
+    mainWindow?.webContents.send("print-error", {
+      message: error.message || "Failed to queue print job",
+    });
+    throw error;
   }
 });
 

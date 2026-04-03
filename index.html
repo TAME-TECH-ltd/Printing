@@ -272,7 +272,7 @@
               v-for="printer in activePrinters"
               :key="printer.id"
               class="printer-item"
-              :class="{ active: isFetching }"
+              :class="{ active: isPrinterFetching(printer) }"
             >
               <div class="printer-icon">
                 <svg viewBox="0 0 24 24" fill="none">
@@ -298,7 +298,10 @@
                     stroke-linejoin="round"
                   />
                 </svg>
-                <div v-if="isFetching" class="printing-indicator"></div>
+                <div
+                  v-if="isPrinterFetching(printer)"
+                  class="printing-indicator"
+                ></div>
               </div>
 
               <div class="printer-info">

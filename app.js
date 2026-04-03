@@ -111,9 +111,8 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
   const INITIAL_RETRY_DELAY = 3000;
   const MAX_RETRY_DELAY = 20000;
   const isFetching = ref(false);
-  const fetchInterval = ref(null);
-  const isActive = ref(false);
-  const retryDelay = ref(INITIAL_RETRY_DELAY);
+  const workerStates = ref({});
+
   const normalizePrinterContent = (rawContent) => {
     if (!rawContent) return "";
     if (Array.isArray(rawContent)) return rawContent.join("");
@@ -128,22 +127,96 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
     return String(rawContent);
   };
 
-  const buildFetchMeta = (meta = null) => {
-    const printer = activePrinters.value[0];
+  const getPrinterWorkerKey = (printer) => {
+    if (!printer) return "";
+    if (printer.id) return `printer:${printer.id}`;
+
+    return [
+      printer.name || "",
+      printer.interface || "",
+      printer.ip || "",
+      printer.port || "",
+      printer.content || "",
+    ].join("|");
+  };
+
+  const getPrinterByKey = (printerKey) => {
+    return activePrinters.value.find(
+      (printer) => getPrinterWorkerKey(printer) === printerKey,
+    );
+  };
+
+  const getPrinterKeyFromMeta = (meta = null) => {
+    if (meta?.printerId) {
+      return `printer:${meta.printerId}`;
+    }
+    return meta?.printerKey || "";
+  };
+
+  const ensureWorkerState = (printerKey) => {
+    if (!printerKey) return null;
+    if (!workerStates.value[printerKey]) {
+      workerStates.value[printerKey] = {
+        isActive: false,
+        isFetching: false,
+        retryDelay: INITIAL_RETRY_DELAY,
+        timer: null,
+      };
+    }
+    return workerStates.value[printerKey];
+  };
+
+  const updateFetchingState = () => {
+    isFetching.value = Object.values(workerStates.value).some(
+      (state) => state.isFetching,
+    );
+  };
+
+  const buildFetchMeta = (printer, meta = null) => {
     const printerContent = normalizePrinterContent(printer?.content);
     return {
       ...(meta || {}),
+      ...(printer?.id ? { printerId: printer.id } : {}),
+      ...(getPrinterWorkerKey(printer)
+        ? { printerKey: getPrinterWorkerKey(printer) }
+        : {}),
       ...(printerContent ? { content: printerContent } : {}),
     };
   };
 
-  const resetRetryDelay = () => {
-    retryDelay.value = INITIAL_RETRY_DELAY;
+  const resetRetryDelay = (printerKey) => {
+    const state = ensureWorkerState(printerKey);
+    if (state) {
+      state.retryDelay = INITIAL_RETRY_DELAY;
+    }
   };
 
-  const increaseRetryDelay = () => {
-    retryDelay.value = Math.min(Math.round(retryDelay.value * 1.8), MAX_RETRY_DELAY);
-    return retryDelay.value;
+  const increaseRetryDelay = (printerKey) => {
+    const state = ensureWorkerState(printerKey);
+    if (!state) return INITIAL_RETRY_DELAY;
+
+    state.retryDelay = Math.min(
+      Math.round(state.retryDelay * 1.8),
+      MAX_RETRY_DELAY,
+    );
+
+    return state.retryDelay;
+  };
+
+  const getRateLimitDelay = (error) => {
+    const status = error?.response?.status;
+    if (status !== 429) return null;
+
+    const retryAfter =
+      error?.response?.headers?.["retry-after"] ||
+      error?.response?.headers?.RetryAfter;
+
+    const retryAfterSeconds = Number(retryAfter);
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+      return Math.min(retryAfterSeconds * 1000, MAX_RETRY_DELAY);
+    }
+
+    return Math.min(Math.max(INITIAL_RETRY_DELAY, BASE_DELAY * 2), MAX_RETRY_DELAY);
   };
 
   const removeLatestFromMeta = (meta = null) => {
@@ -153,16 +226,39 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
     return Object.keys(next).length ? next : null;
   };
 
-  const startFetching = async (meta = null) => {
-    if (!isActive.value || isFetching.value) return;
+  const clearWorkerTimer = (printerKey) => {
+    const state = ensureWorkerState(printerKey);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+  };
+
+  const scheduleNextFetch = (printerKey, meta = null, delay = BASE_DELAY) => {
+    const state = ensureWorkerState(printerKey);
+    if (!state) return;
+
+    clearWorkerTimer(printerKey);
+    state.timer = setTimeout(() => {
+      const latestPrinter = getPrinterByKey(printerKey);
+      if (state.isActive && latestPrinter) {
+        startFetching(printerKey, meta);
+      }
+    }, delay);
+  };
+
+  const startFetching = async (printerKey, meta = null) => {
+    const state = ensureWorkerState(printerKey);
+    const printer = getPrinterByKey(printerKey);
+    if (!state || !state.isActive || state.isFetching || !printer) return;
 
     const roundsUrl = url.value ? "next-printable-round" : null;
-    if (!roundsUrl || !activePrinters.value.length) {
-      scheduleNextFetch(buildFetchMeta(meta), 3000);
+    if (!roundsUrl) {
+      scheduleNextFetch(printerKey, buildFetchMeta(printer, meta), 3000);
       return;
     }
 
-    const requestMeta = buildFetchMeta(meta);
+    const requestMeta = buildFetchMeta(printer, meta);
     let _url = outletCode.value
       ? addBkendIfProduction(url.value, `/api/${roundsUrl}/${outletCode.value}`)
       : addBkendIfProduction(url.value, `/api/${roundsUrl}`);
@@ -174,37 +270,24 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
       _url = encodeQuery(_url, filters);
     }
 
-    isFetching.value = true;
+    state.isFetching = true;
+    updateFetchingState();
 
     try {
       const response = await axios.get(_url);
-      const { status, round, order, items } = response.data || {};
-      resetRetryDelay();
+      const { status, order, items } = response.data || {};
+      resetRetryDelay(printerKey);
       const nextMeta = removeLatestFromMeta(requestMeta);
 
       if (!status) {
-        if (round?.id) {
-          try {
-            const markPrintedUrl = addBkendIfProduction(
-              url.value,
-              `/api/update-printed-round/${round.id}`,
-            );
-            await axios.get(markPrintedUrl);
-          } catch (markError) {
-            console.error("Failed to mark round as printed:", markError);
-          }
-        }
-        scheduleNextFetch(nextMeta, BASE_DELAY);
+        scheduleNextFetch(printerKey, nextMeta, BASE_DELAY);
         return;
       }
 
-      const printer = activePrinters.value[0];
-      if (!printer) {
-        scheduleNextFetch(nextMeta, INITIAL_RETRY_DELAY);
-        return;
-      }
+      const round = response.data.round;
 
       const printData = {
+        printerId: printer.id,
         printer: printer.name,
         type: printer.type,
         interface: printer.interface,
@@ -221,45 +304,93 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
         await window.electronAPI.invoke("print-content", printData);
       } catch (printError) {
         console.error("Print error:", printError);
-        scheduleNextFetch(nextMeta, INITIAL_RETRY_DELAY);
+        scheduleNextFetch(printerKey, nextMeta, INITIAL_RETRY_DELAY);
       }
     } catch (error) {
       console.error("Fetch error:", error);
-      scheduleNextFetch(requestMeta, increaseRetryDelay());
-    } finally {
-      isFetching.value = false;
-    }
-  };
-
-  const scheduleNextFetch = (meta = null, delay = BASE_DELAY) => {
-    if (fetchInterval.value) {
-      clearTimeout(fetchInterval.value);
-    }
-    fetchInterval.value = setTimeout(() => {
-      if (isActive.value) {
-        startFetching(meta);
+      const rateLimitDelay = getRateLimitDelay(error);
+      if (rateLimitDelay !== null) {
+        scheduleNextFetch(printerKey, requestMeta, rateLimitDelay);
+      } else {
+        scheduleNextFetch(
+          printerKey,
+          requestMeta,
+          increaseRetryDelay(printerKey),
+        );
       }
-    }, delay);
+    } finally {
+      state.isFetching = false;
+      updateFetchingState();
+    }
   };
 
-  const stopFetching = () => {
-    isActive.value = false;
-    if (fetchInterval.value) {
-      clearTimeout(fetchInterval.value);
-      fetchInterval.value = null;
+  const stopFetching = (printerKey = null) => {
+    if (printerKey) {
+      const state = ensureWorkerState(printerKey);
+      if (!state) return;
+      state.isActive = false;
+      clearWorkerTimer(printerKey);
+      state.isFetching = false;
+      updateFetchingState();
+      return;
     }
+
+    Object.keys(workerStates.value).forEach((key) => {
+      stopFetching(key);
+    });
+  };
+
+  const pruneWorkerStates = () => {
+    const activeKeys = new Set(activePrinters.value.map(getPrinterWorkerKey));
+
+    Object.keys(workerStates.value).forEach((printerKey) => {
+      if (!activeKeys.has(printerKey)) {
+        stopFetching(printerKey);
+        delete workerStates.value[printerKey];
+      }
+    });
+
+    activePrinters.value.forEach((printer) => {
+      ensureWorkerState(getPrinterWorkerKey(printer));
+    });
+
+    updateFetchingState();
   };
 
   const resumeFetching = (meta = null) => {
-    isActive.value = true;
-    startFetching(meta);
+    pruneWorkerStates();
+
+    const targetedPrinterKey = getPrinterKeyFromMeta(meta);
+    if (targetedPrinterKey) {
+      const latestPrinter = getPrinterByKey(targetedPrinterKey);
+      if (!latestPrinter) return;
+
+      const state = ensureWorkerState(targetedPrinterKey);
+      state.isActive = true;
+      startFetching(targetedPrinterKey, meta);
+      return;
+    }
+
+    activePrinters.value.forEach((printer) => {
+      const printerKey = getPrinterWorkerKey(printer);
+      const state = ensureWorkerState(printerKey);
+      state.isActive = true;
+      startFetching(printerKey, buildFetchMeta(printer, meta));
+    });
+  };
+
+  const isPrinterFetching = (printer) => {
+    const printerKey = getPrinterWorkerKey(printer);
+    return Boolean(workerStates.value[printerKey]?.isFetching);
   };
 
   return {
     isFetching,
+    isPrinterFetching,
     startFetching,
     stopFetching,
     resumeFetching,
+    pruneWorkerStates,
   };
 };
 
@@ -338,8 +469,14 @@ const App = {
     const { isLoading, setupInterceptors } = useApiClient();
     const { hasFlashMessage, message, toggleFlashMessage, clearMessage } =
       useFlashMessage();
-    const { isFetching, startFetching, stopFetching, resumeFetching } =
-      useFetchingService(url, activePrinters, appSettings, outletCode);
+    const {
+      isFetching,
+      isPrinterFetching,
+      startFetching,
+      stopFetching,
+      resumeFetching,
+      pruneWorkerStates,
+    } = useFetchingService(url, activePrinters, appSettings, outletCode);
 
     const roundsUrl = computed(() => {
       return url.value ? "next-printable-round" : null;
@@ -351,12 +488,15 @@ const App = {
       },
 
       printedContent: (meta) => {
-        setTimeout(() => resumeFetching(meta), 3000);
+        setTimeout(() => {
+          resumeFetching(meta);
+        }, 50);
       },
 
-      retryPrinting: (data) => {
-        window.electronAPI.invoke("print-content", data).catch((error) => {
-          console.error("Print retry failed:", error);
+      retryPrinting: () => {
+        toggleFlashMessage({
+          type: "warning",
+          text: "Printer is unavailable. The app will keep retrying automatically.",
         });
       },
 
@@ -452,6 +592,14 @@ const App = {
       setupInterceptors();
       setupEventListeners();
     });
+
+    watch(
+      activePrinters,
+      () => {
+        pruneWorkerStates();
+      },
+      { deep: true },
+    );
 
     onMounted(() => {
       isAuthenticated.value = false; // Always skip login for now
@@ -736,6 +884,7 @@ const App = {
 
       isLoading,
       isFetching,
+      isPrinterFetching,
 
       hasFlashMessage,
       message,
