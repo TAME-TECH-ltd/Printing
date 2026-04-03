@@ -24,6 +24,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
       "login-action",
       "get-settings",
       "get-system-info",
+      "get-dashboard-data",
+      "toggle-printer-pause",
+      "retry-print-job",
+      "clear-print-job",
+      "run-test-print",
+      "sync-remote-print-state",
     ];
 
     try {
@@ -46,6 +52,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       "authResponse",
       "availableSettings",
       "print-error",
+      "dashboard-updated",
+      "queue-reset",
       "print-success",
       "printer-saved",
       "printer-deleted",
@@ -80,6 +88,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       "authResponse",
       "availableSettings",
       "print-error",
+      "dashboard-updated",
+      "queue-reset",
       "print-success",
       "printer-saved",
       "printer-deleted",

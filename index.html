@@ -322,9 +322,45 @@
                     >{{ showPrinterContent(printer.content) }}</span
                   >
                 </div>
+                <div class="printer-health-line">
+                  <span class="printer-health-badge" :class="{ paused: printer.paused }">
+                    {{ printer.paused ? "Paused" : "Active" }}
+                  </span>
+                  <span v-if="printer.queue?.pending" class="printer-health-text">
+                    Pending: {{ printer.queue.pending }}
+                  </span>
+                  <span
+                    v-if="printer.lastSuccessAtLabel"
+                    class="printer-health-text"
+                  >
+                    Last success: {{ printer.lastSuccessAtLabel }}
+                  </span>
+                </div>
+                <div
+                  v-if="printer.lastErrorMessage"
+                  class="printer-health-text danger-text"
+                >
+                  Last error: {{ printer.lastErrorMessage }}
+                </div>
               </div>
 
               <div class="printer-actions">
+                <button
+                  class="action-btn"
+                  @click="runTestPrint(printer)"
+                  :disabled="isPrinterActionLoading(printer.id, 'test')"
+                  title="Run Test Print"
+                >
+                  Test
+                </button>
+                <button
+                  class="action-btn"
+                  @click="togglePrinterPause(printer)"
+                  :disabled="isPrinterActionLoading(printer.id, 'pause')"
+                  :title="printer.paused ? 'Resume Printer' : 'Pause Printer'"
+                >
+                  {{ printer.paused ? 'Run' : 'Hold' }}
+                </button>
                 <button
                   class="action-btn"
                   @click="showPrinterForm(printer)"
@@ -372,6 +408,223 @@
           </div>
         </div>
 
+        <div
+          class="dashboard-section url-section"
+          :class="{ collapsed: !showServiceHealth }"
+          v-show="displayMode === 'PRINTERS_VIEW'"
+        >
+          <div class="section-header" @click="toggleServiceHealth">
+            <h2 class="section-title">Service Health</h2>
+            <div class="section-header-actions">
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                @click.stop="refreshDashboard(false)"
+                :disabled="isRefreshingDashboard"
+              >
+                <span v-if="isRefreshingDashboard">Refreshing...</span>
+                <span v-else>Refresh</span>
+              </button>
+              <button
+                type="button"
+                class="toggle-btn"
+                :class="{ expanded: showServiceHealth }"
+                aria-label="Toggle service health"
+              >
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M6 9L12 15L18 9"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="section-content" v-show="showServiceHealth">
+            <div class="health-summary-grid">
+              <div class="health-card">
+                <div class="health-value">{{ dashboard.summary.pendingJobs || 0 }}</div>
+                <div class="health-label">Pending Jobs</div>
+              </div>
+              <div class="health-card">
+                <div class="health-value">{{ dashboard.summary.processingJobs || 0 }}</div>
+                <div class="health-label">Processing</div>
+              </div>
+              <div class="health-card">
+                <div class="health-value">{{ dashboard.summary.retryJobs || 0 }}</div>
+                <div class="health-label">Retry Queue</div>
+              </div>
+              <div class="health-card">
+                <div class="health-value">
+                  {{ dashboard.summary.oldestPendingAtLabel || "Clear" }}
+                </div>
+                <div class="health-label">Oldest Pending</div>
+              </div>
+              <div
+                class="health-card"
+                :class="getCheckClass(dashboard.remoteMetrics.status)"
+              >
+                <div class="health-value">
+                  {{ dashboard.remoteMetrics.pendingRounds ?? 0 }}
+                </div>
+                <div class="health-label">API Pending</div>
+                <div class="health-note">
+                  {{ dashboard.remoteMetrics.checkedAtLabel || "Waiting for API" }}
+                </div>
+              </div>
+            </div>
+
+            <div class="checks-grid">
+              <div
+                v-for="check in dashboard.startupChecks"
+                :key="check.key"
+                class="check-card"
+                :class="getCheckClass(check.status)"
+              >
+                <div class="check-title">{{ check.label }}</div>
+                <div class="check-text">{{ check.message }}</div>
+              </div>
+            </div>
+
+            <div class="remote-metrics-row">
+              <div
+                class="check-card compact"
+                :class="getCheckClass(dashboard.remoteMetrics.status)"
+              >
+                <div class="check-title">API Queue</div>
+                <div class="check-text">{{ dashboard.remoteMetrics.message }}</div>
+                <div class="check-text" v-if="dashboard.remoteMetrics.oldestPendingAtLabel">
+                  Oldest pending: {{ dashboard.remoteMetrics.oldestPendingAtLabel }}
+                </div>
+                <div class="check-text">
+                  Orders: {{ dashboard.remoteMetrics.orderRounds || 0 }} |
+                  Invoices: {{ dashboard.remoteMetrics.invoiceRounds || 0 }} |
+                  Kitchen: {{ dashboard.remoteMetrics.kitchenRounds || 0 }} |
+                  Bar: {{ dashboard.remoteMetrics.barRounds || 0 }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="dashboard-section url-section"
+          :class="{ collapsed: !showQueuePanel }"
+          v-show="displayMode === 'PRINTERS_VIEW'"
+        >
+          <div class="section-header" @click="toggleQueuePanel">
+            <h2 class="section-title">Queue</h2>
+            <button
+              type="button"
+              class="toggle-btn"
+              :class="{ expanded: showQueuePanel }"
+              aria-label="Toggle queue panel"
+            >
+              <svg viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M6 9L12 15L18 9"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+          <div class="section-content" v-show="showQueuePanel">
+            <div v-if="!dashboard.queuedJobs.length" class="empty-inline-state">
+              No queued jobs right now.
+            </div>
+
+            <div v-else class="queue-list">
+              <div v-for="job in dashboard.queuedJobs" :key="job.id" class="queue-item">
+                <div class="queue-main">
+                  <div class="queue-title">
+                    Job #{{ job.id }} - {{ job.printer_name }}
+                    <span class="queue-status">{{ job.status }}</span>
+                  </div>
+                  <div class="queue-meta">
+                    <span>Round: {{ job.round_id || "Test" }}</span>
+                    <span>Attempts: {{ job.attempts }}</span>
+                    <span v-if="job.next_retry_at_label"
+                      >Retry: {{ job.next_retry_at_label }}</span
+                    >
+                  </div>
+                  <div v-if="job.last_error" class="queue-error">
+                    {{ job.last_error }}
+                  </div>
+                </div>
+                <div class="queue-actions">
+                  <button
+                    class="btn btn-secondary btn-sm"
+                    @click="retryPrintJob(job)"
+                    :disabled="isJobActionLoading(job.id) || job.status === 'processing'"
+                  >
+                    Retry Now
+                  </button>
+                  <button
+                    class="btn btn-outline-secondary btn-sm"
+                    @click="clearPrintJob(job)"
+                    :disabled="isJobActionLoading(job.id) || job.status === 'processing'"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="dashboard-section url-section"
+          :class="{ collapsed: !showRecentActivity }"
+          v-show="displayMode === 'PRINTERS_VIEW'"
+        >
+          <div class="section-header" @click="toggleRecentActivity">
+            <h2 class="section-title">Recent Activity</h2>
+            <button
+              type="button"
+              class="toggle-btn"
+              :class="{ expanded: showRecentActivity }"
+              aria-label="Toggle recent activity"
+            >
+              <svg viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M6 9L12 15L18 9"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+          <div class="section-content" v-show="showRecentActivity">
+            <div v-if="!dashboard.recentLogs.length" class="empty-inline-state">
+              No print activity recorded yet.
+            </div>
+            <div v-else class="activity-card">
+              <div
+                v-for="log in dashboard.recentLogs"
+                :key="log.id"
+                class="activity-row"
+              >
+                <div class="activity-title">
+                  {{ log.status.toUpperCase() }} - {{ log.message }}
+                </div>
+                <div class="activity-meta">
+                  <span>{{ log.printer_name || log.printer_key }}</span>
+                  <span>{{ log.created_at_label }}</span>
+                  <span v-if="log.duration_ms">{{ log.duration_ms }} ms</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Printer Form -->
         <div v-if="displayMode === 'FORM_VIEW'" class="printer-form-section">
           <div class="form-container">
@@ -382,7 +635,7 @@
                 @click="handleCancel"
                 aria-label="Close printer form"
               >
-                ×
+                x
               </button>
             </div>
 
@@ -484,6 +737,45 @@
                 </div>
               </div>
 
+              <div class="advanced-card">
+                <h4 class="advanced-title">Printer Capabilities</h4>
+                <div class="content-options advanced-options">
+                  <label class="checkbox-label">
+                    <input type="checkbox" v-model="supportsCut" />
+                    <span class="checkmark"></span>
+                    Auto cut
+                  </label>
+                  <label class="checkbox-label">
+                    <input type="checkbox" v-model="supportsBeep" />
+                    <span class="checkmark"></span>
+                    Beep
+                  </label>
+                  <label class="checkbox-label">
+                    <input type="checkbox" v-model="supportsQr" />
+                    <span class="checkmark"></span>
+                    QR on receipts
+                  </label>
+                </div>
+                <div class="form-row advanced-row">
+                  <div class="form-group">
+                    <label for="printerCharset">Character Set</label>
+                    <select
+                      id="printerCharset"
+                      v-model="printerCharacterSet"
+                      class="form-control"
+                    >
+                      <option
+                        v-for="charset in CHARACTER_SET_OPTIONS"
+                        :key="charset.value"
+                        :value="charset.value"
+                      >
+                        {{ charset.label }}
+                      </option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
               <div class="form-actions">
                 <button
                   type="submit"
@@ -509,6 +801,7 @@
             </form>
           </div>
         </div>
+
       </div>
     </div>
 

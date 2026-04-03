@@ -1,6 +1,14 @@
 const electron = require("electron");
 const path = require("path");
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage } = electron;
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  Tray,
+  nativeImage,
+  Notification,
+} = electron;
 const {
   ThermalPrinter,
   PrinterTypes,
@@ -8,6 +16,7 @@ const {
   BreakLine,
 } = require("node-thermal-printer");
 const Database = require("better-sqlite3");
+const os = require("os");
 
 const userDataPath = app.getPath("userData");
 const dbFilePath = path.join(userDataPath, "printing.sqlite");
@@ -16,6 +25,12 @@ console.log("Database path:", dbFilePath);
 let db;
 const activePrinterProcessors = new Set();
 const printQueueTimers = new Map();
+const suppressedRoundIds = new Set();
+let recoveredInterruptedJobsCount = 0;
+let lastKnownSystemPrinters = [];
+let lastDashboardNotificationAt = 0;
+let cachedStartupChecks = [];
+let cachedStartupChecksAt = 0;
 
 const PRINT_JOB_STATUS = {
   PENDING: "pending",
@@ -26,6 +41,8 @@ const PRINT_JOB_STATUS = {
 const PRINT_QUEUE_BASE_DELAY_MS = 3000;
 const PRINT_QUEUE_MAX_DELAY_MS = 60000;
 const PRINT_EXECUTION_TIMEOUT_MS = 20000;
+const DASHBOARD_NOTIFICATION_THROTTLE_MS = 60000;
+const DEFAULT_PRINTER_CHARACTER_SET = "PC852_LATIN2";
 
 function initializeDatabase() {
   try {
@@ -63,6 +80,7 @@ function initializeDatabase() {
     db.exec(`
       CREATE TABLE IF NOT EXISTS print_jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        printer_id INTEGER,
         round_id INTEGER,
         printer_key TEXT NOT NULL,
         payload TEXT NOT NULL,
@@ -71,6 +89,10 @@ function initializeDatabase() {
         last_error TEXT,
         next_retry_at TEXT,
         locked_at TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        duration_ms INTEGER,
+        test_mode INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -80,6 +102,57 @@ function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_print_jobs_status_retry
       ON print_jobs (status, next_retry_at, created_at);
     `);
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS print_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        printer_id INTEGER,
+        printer_key TEXT NOT NULL,
+        round_id INTEGER,
+        job_id INTEGER,
+        event_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        payload TEXT,
+        duration_ms INTEGER,
+        created_at TEXT NOT NULL
+      );
+    `);
+
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_print_logs_printer_created
+      ON print_logs (printer_key, created_at DESC);
+    `);
+
+    ensureColumnExists("printers", "paused", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumnExists(
+      "printers",
+      "supports_cut",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+    ensureColumnExists(
+      "printers",
+      "supports_beep",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+    ensureColumnExists(
+      "printers",
+      "supports_qr",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+    ensureColumnExists(
+      "printers",
+      "character_set",
+      `TEXT NOT NULL DEFAULT '${DEFAULT_PRINTER_CHARACTER_SET}'`,
+    );
+
+    ensureColumnExists("print_jobs", "printer_id", "INTEGER");
+    ensureColumnExists("print_jobs", "started_at", "TEXT");
+    ensureColumnExists("print_jobs", "completed_at", "TEXT");
+    ensureColumnExists("print_jobs", "duration_ms", "INTEGER");
+    ensureColumnExists("print_jobs", "test_mode", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumnExists("settings", "remote_system_date", "TEXT");
+    ensureColumnExists("settings", "remote_day_token", "TEXT");
 
     recoverInterruptedPrintJobs();
 
@@ -100,8 +173,99 @@ function initializeDatabase() {
   }
 }
 
+function ensureColumnExists(tableName, columnName, columnDefinition) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (!columns.some((column) => column.name === columnName)) {
+    db.exec(
+      `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`,
+    );
+  }
+}
+
 function nowIsoString() {
   return new Date().toISOString();
+}
+
+function safeJsonParse(value, fallback = null) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function boolToInt(value, defaultValue = 0) {
+  if (value === undefined || value === null || value === "") {
+    return defaultValue;
+  }
+
+  return value ? 1 : 0;
+}
+
+function formatTimestampForUi(timestamp) {
+  if (!timestamp) return null;
+
+  try {
+    return new Date(timestamp).toLocaleString("en-US", {
+      timeZone: helper.timeZone,
+    });
+  } catch {
+    return timestamp;
+  }
+}
+
+function getPrinterIdFromKey(printerKey) {
+  if (!printerKey || !printerKey.startsWith("printer:")) {
+    return null;
+  }
+
+  const id = Number(printerKey.slice("printer:".length));
+  return Number.isFinite(id) ? id : null;
+}
+
+function getPrinterRecordById(printerId) {
+  if (!printerId) return null;
+  return db.prepare("SELECT * FROM printers WHERE id = ?").get(printerId) || null;
+}
+
+function getPrinterRecordByKey(printerKey) {
+  const printerId = getPrinterIdFromKey(printerKey);
+  if (!printerId) return null;
+  return getPrinterRecordById(printerId);
+}
+
+function getPrinterDisplayName(printerKey) {
+  const printer = getPrinterRecordByKey(printerKey);
+  return printer?.name || printerKey;
+}
+
+function getSettingsRecord() {
+  return db.prepare("SELECT * FROM settings LIMIT 1").get() || null;
+}
+
+function normalizeSystemDate(value) {
+  if (!value) return null;
+  const stringValue = String(value);
+  return stringValue.length >= 10 ? stringValue.slice(0, 10) : stringValue;
+}
+
+function buildClientToken(data = {}) {
+  const printerLabel = data?.printer || data?.printerKey || "printer";
+  return `${os.hostname()}:${printerLabel}`;
+}
+
+function truncatePayload(payload) {
+  const serialized =
+    typeof payload === "string" ? payload : JSON.stringify(payload || {});
+  return serialized.slice(0, 4000);
 }
 
 function buildPrinterKey(data = {}) {
@@ -123,7 +287,155 @@ function buildPrintedMeta(data = {}) {
     latest: data?.round?.id,
     ...(data?.printerId ? { printerId: data.printerId } : {}),
     ...(data?.printerKey ? { printerKey: data.printerKey } : {}),
+    ...(data?.clientToken ? { clientToken: data.clientToken } : {}),
+    ...(data?.printAttempts ? { printAttempts: data.printAttempts } : {}),
     ...(data?.content ? { content: data.content } : {}),
+  };
+}
+
+function clearAllPrintQueueTimers() {
+  Array.from(printQueueTimers.keys()).forEach((printerKey) => {
+    clearPrintQueueTimer(printerKey);
+  });
+}
+
+function purgeQueuedRoundsForDayClose(remoteState = {}) {
+  const jobs = db
+    .prepare(
+      `
+        SELECT id, printer_id, printer_key, round_id, status
+        FROM print_jobs
+        WHERE round_id IS NOT NULL
+          AND status IN (?, ?)
+      `,
+    )
+    .all(PRINT_JOB_STATUS.PENDING, PRINT_JOB_STATUS.PROCESSING);
+
+  if (!jobs.length) {
+    return { purgedJobs: 0, purgedRounds: 0 };
+  }
+
+  jobs.forEach((job) => {
+    if (job?.round_id) {
+      suppressedRoundIds.add(Number(job.round_id));
+    }
+  });
+
+  const result = db
+    .prepare(
+      `
+        DELETE FROM print_jobs
+        WHERE round_id IS NOT NULL
+          AND status IN (?, ?)
+      `,
+    )
+    .run(PRINT_JOB_STATUS.PENDING, PRINT_JOB_STATUS.PROCESSING);
+
+  clearAllPrintQueueTimers();
+
+  const purgedRounds = jobs.filter((job) => job?.round_id).length;
+  const message = `Cleared ${result.changes} local print job(s) after day close`;
+
+  insertPrintLog({
+    printer_key: "system",
+    event_type: "day-close-purge",
+    status: "warning",
+    message,
+    payload: {
+      systemDate: remoteState.systemDate || null,
+      dayToken: remoteState.dayToken || null,
+      purgedJobs: jobs.map((job) => job.id),
+      purgedRounds: jobs.map((job) => job.round_id).filter(Boolean),
+    },
+  });
+
+  mainWindow?.webContents.send("queue-reset", {
+    message,
+    purgedJobs: Number(result.changes || 0),
+    purgedRounds,
+    systemDate: remoteState.systemDate || null,
+  });
+
+  maybeNotify("Printing Service", message);
+  sendDashboardUpdate();
+
+  return {
+    purgedJobs: Number(result.changes || 0),
+    purgedRounds,
+  };
+}
+
+function hasStaleQueuedRoundsForSystemDate(systemDate) {
+  const normalizedSystemDate = normalizeSystemDate(systemDate);
+  if (!normalizedSystemDate) {
+    return false;
+  }
+
+  const jobs = db
+    .prepare(
+      `
+        SELECT payload
+        FROM print_jobs
+        WHERE round_id IS NOT NULL
+          AND status IN (?, ?)
+      `,
+    )
+    .all(PRINT_JOB_STATUS.PENDING, PRINT_JOB_STATUS.PROCESSING);
+
+  return jobs.some((job) => {
+    const payload = safeJsonParse(job?.payload, {});
+    const jobSystemDate = normalizeSystemDate(
+      payload?.order?.system_date || payload?.round?.printed_date || null,
+    );
+    return jobSystemDate && jobSystemDate !== normalizedSystemDate;
+  });
+}
+
+function syncRemotePrintState(data = {}) {
+  if (!db) {
+    return { success: false, message: "Database is not initialized" };
+  }
+
+  const settings = getSettingsRecord();
+  const incomingDayToken = String(data?.dayToken || "").trim();
+  const incomingSystemDate = String(data?.systemDate || "").trim() || null;
+
+  if (!incomingDayToken && !incomingSystemDate) {
+    return { success: true, changed: false, purgedJobs: 0, purgedRounds: 0 };
+  }
+
+  if (settings?.id) {
+    db.prepare(
+      `
+        UPDATE settings
+        SET remote_system_date = ?, remote_day_token = ?
+        WHERE id = ?
+      `,
+    ).run(incomingSystemDate, incomingDayToken || null, settings.id);
+  }
+
+  const previousDayToken = String(settings?.remote_day_token || "").trim();
+  const shouldPurgeOnInitialSync =
+    !previousDayToken &&
+    Boolean(incomingSystemDate) &&
+    hasStaleQueuedRoundsForSystemDate(incomingSystemDate);
+
+  if (
+    !shouldPurgeOnInitialSync &&
+    (!previousDayToken || !incomingDayToken || previousDayToken === incomingDayToken)
+  ) {
+    return { success: true, changed: false, purgedJobs: 0, purgedRounds: 0 };
+  }
+
+  const purgeResult = purgeQueuedRoundsForDayClose({
+    systemDate: incomingSystemDate,
+    dayToken: incomingDayToken,
+  });
+
+  return {
+    success: true,
+    changed: true,
+    ...purgeResult,
   };
 }
 
@@ -131,13 +443,354 @@ function recoverInterruptedPrintJobs() {
   if (!db) return;
 
   const now = nowIsoString();
-  db.prepare(
+  const result = db.prepare(
     `
       UPDATE print_jobs
       SET status = ?, locked_at = NULL, next_retry_at = COALESCE(next_retry_at, ?), updated_at = ?
       WHERE status = ?
     `,
   ).run(PRINT_JOB_STATUS.PENDING, now, now, PRINT_JOB_STATUS.PROCESSING);
+
+  recoveredInterruptedJobsCount = Number(result?.changes || 0);
+}
+
+function insertPrintLog(entry = {}) {
+  if (!db) return;
+
+  db.prepare(
+    `
+      INSERT INTO print_logs (
+        printer_id,
+        printer_key,
+        round_id,
+        job_id,
+        event_type,
+        status,
+        message,
+        payload,
+        duration_ms,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    entry.printer_id || null,
+    entry.printer_key || "",
+    entry.round_id || null,
+    entry.job_id || null,
+    entry.event_type || "job",
+    entry.status || "info",
+    entry.message || null,
+    entry.payload ? truncatePayload(entry.payload) : null,
+    entry.duration_ms || null,
+    entry.created_at || nowIsoString(),
+  );
+}
+
+function getQueueSummary() {
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          COUNT(*) AS total_jobs,
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_jobs,
+          SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing_jobs,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_jobs,
+          SUM(CASE WHEN status = 'pending' AND attempts > 0 THEN 1 ELSE 0 END) AS retry_jobs,
+          MIN(CASE WHEN status = 'pending' THEN created_at END) AS oldest_pending_at
+        FROM print_jobs
+      `,
+    )
+    .get();
+
+  return {
+    totalJobs: Number(rows?.total_jobs || 0),
+    pendingJobs: Number(rows?.pending_jobs || 0),
+    processingJobs: Number(rows?.processing_jobs || 0),
+    completedJobs: Number(rows?.completed_jobs || 0),
+    retryJobs: Number(rows?.retry_jobs || 0),
+    oldestPendingAt: rows?.oldest_pending_at || null,
+  };
+}
+
+function updateTrayStatus() {
+  if (!tray || !db) return;
+
+  const summary = getQueueSummary();
+  const tooltip = [
+    "Printing Service",
+    `Pending: ${summary.pendingJobs}`,
+    `Processing: ${summary.processingJobs}`,
+    `Retrying: ${summary.retryJobs}`,
+  ].join(" | ");
+
+  tray.setToolTip(tooltip);
+}
+
+function maybeNotify(title, body) {
+  if (!Notification?.isSupported?.()) return;
+
+  const now = Date.now();
+  if (now - lastDashboardNotificationAt < DASHBOARD_NOTIFICATION_THROTTLE_MS) {
+    return;
+  }
+
+  lastDashboardNotificationAt = now;
+  new Notification({
+    title,
+    body,
+    silent: false,
+  }).show();
+}
+
+function sendDashboardUpdate() {
+  updateTrayStatus();
+  mainWindow?.webContents.send("dashboard-updated");
+}
+
+function invalidateStartupChecksCache() {
+  cachedStartupChecks = [];
+  cachedStartupChecksAt = 0;
+}
+
+function mapPrinterForUi(printer) {
+  return {
+    ...printer,
+    paused: Boolean(printer?.paused),
+    supports_cut: Boolean(printer?.supports_cut),
+    supports_beep: Boolean(printer?.supports_beep),
+    supports_qr: Boolean(printer?.supports_qr),
+    character_set: printer?.character_set || DEFAULT_PRINTER_CHARACTER_SET,
+  };
+}
+
+function getRecentPrintLogs(limit = 30) {
+  const rows = db
+    .prepare(
+      `
+        SELECT *
+        FROM print_logs
+        ORDER BY datetime(created_at) DESC, id DESC
+        LIMIT ?
+      `,
+    )
+    .all(limit);
+
+  return rows.map((row) => ({
+    ...row,
+    printer_name: getPrinterDisplayName(row.printer_key),
+    created_at_label: formatTimestampForUi(row.created_at),
+  }));
+}
+
+function getQueuedJobs(limit = 30) {
+  const rows = db
+    .prepare(
+      `
+        SELECT id, printer_id, round_id, printer_key, status, attempts, last_error, next_retry_at, created_at, test_mode
+        FROM print_jobs
+        WHERE status != ?
+        ORDER BY
+          CASE status WHEN 'processing' THEN 0 ELSE 1 END,
+          COALESCE(datetime(next_retry_at), datetime(created_at)) ASC,
+          id ASC
+        LIMIT ?
+      `,
+    )
+    .all(PRINT_JOB_STATUS.COMPLETED, limit);
+
+  return rows.map((row) => ({
+    ...row,
+    printer_name: getPrinterDisplayName(row.printer_key),
+    next_retry_at_label: formatTimestampForUi(row.next_retry_at),
+    created_at_label: formatTimestampForUi(row.created_at),
+    test_mode: Boolean(row.test_mode),
+  }));
+}
+
+async function buildStartupChecks() {
+  if (Date.now() - cachedStartupChecksAt < 30000 && cachedStartupChecks.length) {
+    return cachedStartupChecks;
+  }
+
+  const settings = db.prepare("SELECT * FROM settings LIMIT 1").get();
+  const configuredPrinters = db.prepare("SELECT * FROM printers").all();
+
+  const checks = [
+    {
+      key: "database",
+      label: "Local database",
+      status: "ok",
+      message: "SQLite queue database is available",
+    },
+    {
+      key: "queue",
+      label: "Queue recovery",
+      status: recoveredInterruptedJobsCount > 0 ? "warning" : "ok",
+      message:
+        recoveredInterruptedJobsCount > 0
+          ? `${recoveredInterruptedJobsCount} interrupted jobs were recovered on startup`
+          : "No interrupted print jobs were found",
+    },
+    {
+      key: "api-config",
+      label: "API configuration",
+      status: settings?.base_url ? "ok" : "warning",
+      message: settings?.base_url
+        ? `Connected to ${settings.base_url}`
+        : "Server URL is not configured",
+    },
+    {
+      key: "printers-config",
+      label: "Configured printers",
+      status: configuredPrinters.length ? "ok" : "warning",
+      message: configuredPrinters.length
+        ? `${configuredPrinters.length} printer(s) configured`
+        : "No printers are configured yet",
+    },
+    {
+      key: "system-printers",
+      label: "System printers",
+      status: lastKnownSystemPrinters.length ? "ok" : "warning",
+      message: lastKnownSystemPrinters.length
+        ? `${lastKnownSystemPrinters.length} printer(s) detected by Electron`
+        : "System printers have not been detected yet",
+    },
+  ];
+
+  if (configuredPrinters.length) {
+    for (const printer of configuredPrinters.slice(0, 5)) {
+      try {
+        const payload = buildTestPrintPayload({
+          printerId: printer.id,
+          printer: printer.name,
+          type: printer.type,
+          interface: printer.interface,
+          port: printer.port,
+          ip: printer.ip,
+          supportsCut: Boolean(printer.supports_cut),
+          supportsBeep: Boolean(printer.supports_beep),
+          supportsQr: Boolean(printer.supports_qr),
+          characterSet: printer.character_set,
+        });
+        const transport = resolvePrinterTransport(payload);
+        let status = "ok";
+        let message = `Ready via ${transport.uri}`;
+
+        if (transport.shouldCheckConnection) {
+          const checker = new ThermalPrinter({
+            type: PrinterTypes[payload.type],
+            characterSet: resolveCharacterSet(payload.characterSet),
+            interface: transport.uri,
+            removeSpecialCharacters: false,
+            breakLine: BreakLine.WORD,
+            options: { timeout: 4000 },
+          });
+          const isConnected = await withTimeout(
+            checker.isPrinterConnected(),
+            5000,
+            "Startup printer check",
+          );
+          if (!isConnected) {
+            status = "warning";
+            message = `Printer is not responding via ${transport.uri}`;
+          }
+        }
+
+        checks.push({
+          key: `printer-${printer.id}`,
+          label: printer.name,
+          status: printer.paused ? "warning" : status,
+          message: printer.paused ? "Printer is paused" : message,
+        });
+      } catch (error) {
+        checks.push({
+          key: `printer-${printer.id}`,
+          label: printer.name,
+          status: "danger",
+          message: truncateErrorMessage(error),
+        });
+      }
+    }
+  }
+
+  cachedStartupChecks = checks;
+  cachedStartupChecksAt = Date.now();
+
+  return checks;
+}
+
+async function getDashboardData() {
+  const printers = db.prepare("SELECT * FROM printers ORDER BY id ASC").all();
+  const summary = getQueueSummary();
+  const printerSummaries = printers.map((printer) => {
+    const printerKey = `printer:${printer.id}`;
+    const queueRow = db
+      .prepare(
+        `
+          SELECT
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_jobs,
+            SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing_jobs,
+            SUM(CASE WHEN status = 'pending' AND attempts > 0 THEN 1 ELSE 0 END) AS retry_jobs,
+            MIN(CASE WHEN status = 'pending' THEN next_retry_at END) AS next_retry_at
+          FROM print_jobs
+          WHERE printer_key = ? AND status != ?
+        `,
+      )
+      .get(printerKey, PRINT_JOB_STATUS.COMPLETED);
+
+    const lastSuccess = db
+      .prepare(
+        `
+          SELECT created_at, duration_ms, message
+          FROM print_logs
+          WHERE printer_key = ? AND status = 'success'
+          ORDER BY datetime(created_at) DESC, id DESC
+          LIMIT 1
+        `,
+      )
+      .get(printerKey);
+
+    const lastFailure = db
+      .prepare(
+        `
+          SELECT created_at, message
+          FROM print_logs
+          WHERE printer_key = ? AND status = 'error'
+          ORDER BY datetime(created_at) DESC, id DESC
+          LIMIT 1
+        `,
+      )
+      .get(printerKey);
+
+    return {
+      ...mapPrinterForUi(printer),
+      queue: {
+        pending: Number(queueRow?.pending_jobs || 0),
+        processing: Number(queueRow?.processing_jobs || 0),
+        retrying: Number(queueRow?.retry_jobs || 0),
+        nextRetryAt: queueRow?.next_retry_at || null,
+        nextRetryAtLabel: formatTimestampForUi(queueRow?.next_retry_at || null),
+      },
+      lastSuccessAt: lastSuccess?.created_at || null,
+      lastSuccessAtLabel: formatTimestampForUi(lastSuccess?.created_at || null),
+      lastSuccessDurationMs: lastSuccess?.duration_ms || null,
+      lastErrorAt: lastFailure?.created_at || null,
+      lastErrorAtLabel: formatTimestampForUi(lastFailure?.created_at || null),
+      lastErrorMessage: lastFailure?.message || null,
+    };
+  });
+
+  return {
+    summary: {
+      ...summary,
+      oldestPendingAtLabel: formatTimestampForUi(summary.oldestPendingAt),
+    },
+    startupChecks: await buildStartupChecks(),
+    printers: printerSummaries,
+    queuedJobs: getQueuedJobs(),
+    recentLogs: getRecentPrintLogs(),
+  };
 }
 
 function clearPrintQueueTimer(printerKey) {
@@ -246,17 +899,68 @@ function resolvePrinterTransport(data = {}) {
   };
 }
 
+function resolveCharacterSet(name) {
+  if (!name) {
+    return CharacterSet[DEFAULT_PRINTER_CHARACTER_SET];
+  }
+
+  return CharacterSet[name] || CharacterSet[DEFAULT_PRINTER_CHARACTER_SET];
+}
+
+function buildTestPrintPayload(data = {}) {
+  return {
+    ...data,
+    round: {
+      id: null,
+      category: "TEST",
+      round_no: "TEST",
+      destination: "SERVICE",
+      origin: "SERVICE",
+    },
+    order: {
+      id: "TEST",
+      client: "Printer Test",
+      waiter: os.userInfo().username,
+      table_name: "N/A",
+      system_date: new Date().toISOString(),
+      order_time: new Date().toISOString(),
+      grand_total: 0,
+      total_taxes: 0,
+    },
+    items: [
+      {
+        name: "Printer connection check",
+        quantity: 1,
+        price: 0,
+        amount: 0,
+      },
+    ],
+    settings: {
+      site_name: "Printing Service",
+      app_tin: "TEST",
+      app_phone: os.hostname(),
+      app_email: "local@test",
+      site_address: "Local diagnostic ticket",
+      momo_code: "",
+      ...(data.settings || {}),
+    },
+    testMode: true,
+  };
+}
+
 function enqueuePrintJob(data = {}) {
   if (!db) {
     throw new Error("Database is not initialized");
   }
 
   const roundId = Number(data?.round?.id) || null;
+  const printerId = Number(data?.printerId) || null;
   const printerKey = buildPrinterKey(data);
   const now = nowIsoString();
   const payload = JSON.stringify({
     ...data,
     printerKey,
+    clientToken: data?.clientToken || buildClientToken(data),
   });
 
   if (roundId) {
@@ -321,21 +1025,47 @@ function enqueuePrintJob(data = {}) {
     .prepare(
       `
         INSERT INTO print_jobs (
+          printer_id,
           round_id,
           printer_key,
           payload,
           status,
           attempts,
+          test_mode,
           next_retry_at,
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
       `,
     )
-    .run(roundId, printerKey, payload, PRINT_JOB_STATUS.PENDING, now, now, now);
+    .run(
+      printerId,
+      roundId,
+      printerKey,
+      payload,
+      PRINT_JOB_STATUS.PENDING,
+      boolToInt(data?.testMode, 0),
+      now,
+      now,
+      now,
+    );
+
+  insertPrintLog({
+    printer_id: printerId,
+    printer_key: printerKey,
+    round_id: roundId,
+    job_id: result.lastInsertRowid,
+    event_type: data?.testMode ? "test-print" : "queued",
+    status: "queued",
+    message: data?.testMode
+      ? "Test print queued"
+      : `Queued round ${roundId || "manual"} for printing`,
+    payload,
+  });
 
   schedulePrintQueue(printerKey, 0);
+  sendDashboardUpdate();
 
   return {
     success: true,
@@ -374,21 +1104,21 @@ function markPrintJobProcessing(jobId) {
   db.prepare(
     `
       UPDATE print_jobs
-      SET status = ?, locked_at = ?, updated_at = ?
+      SET status = ?, locked_at = ?, started_at = COALESCE(started_at, ?), updated_at = ?
       WHERE id = ?
     `,
-  ).run(PRINT_JOB_STATUS.PROCESSING, now, now, jobId);
+  ).run(PRINT_JOB_STATUS.PROCESSING, now, now, now, jobId);
 }
 
-function markPrintJobCompleted(jobId) {
+function markPrintJobCompleted(jobId, durationMs = null) {
   const now = nowIsoString();
   db.prepare(
     `
       UPDATE print_jobs
-      SET status = ?, locked_at = NULL, updated_at = ?, next_retry_at = NULL
+      SET status = ?, locked_at = NULL, completed_at = ?, duration_ms = ?, updated_at = ?, next_retry_at = NULL
       WHERE id = ?
     `,
-  ).run(PRINT_JOB_STATUS.COMPLETED, now, jobId);
+  ).run(PRINT_JOB_STATUS.COMPLETED, now, durationMs, now, jobId);
 }
 
 function markPrintJobForRetry(job, error) {
@@ -407,12 +1137,19 @@ function markPrintJobForRetry(job, error) {
   ).run(PRINT_JOB_STATUS.PENDING, attempts, message, retryAt, now, job.id);
 
   if (attempts === 1 || attempts % 5 === 0) {
+    const printerName = getPrinterDisplayName(job?.printer_key);
     mainWindow?.webContents.send("print-error", {
       message: `Print failed. Retrying in ${Math.round(retryDelayMs / 1000)}s.`,
       error: message,
       attempts,
       roundId: job?.round_id || null,
+      printerName,
     });
+
+    maybeNotify(
+      "Printing Service",
+      `${printerName}: ${message}`,
+    );
   }
 
   return retryDelayMs;
@@ -428,6 +1165,11 @@ function getRetryDelayUntil(nextRetryAt) {
 async function processPrintQueue(printerKey) {
   if (!db || !printerKey || activePrinterProcessors.has(printerKey)) return;
 
+  const printer = getPrinterRecordByKey(printerKey);
+  if (printer?.paused) {
+    return;
+  }
+
   const job = getNextQueuedPrintJob(printerKey);
   if (!job) {
     const futureJob = getNextQueuedPrintJob(printerKey, true);
@@ -442,15 +1184,84 @@ async function processPrintQueue(printerKey) {
 
   activePrinterProcessors.add(printerKey);
   markPrintJobProcessing(job.id);
+  insertPrintLog({
+    printer_id: job.printer_id,
+    printer_key: printerKey,
+    round_id: job.round_id,
+    job_id: job.id,
+    event_type: "processing",
+    status: "processing",
+    message: `Processing job ${job.id}`,
+  });
+  sendDashboardUpdate();
 
   try {
     const payload = JSON.parse(job.payload);
+    const startedAt = Date.now();
     await performPrintJob(payload);
-    markPrintJobCompleted(job.id);
+    const durationMs = Date.now() - startedAt;
+    const remainingJob = db
+      .prepare("SELECT id FROM print_jobs WHERE id = ?")
+      .get(job.id);
+    const wasPurgedByDayClose =
+      !remainingJob ||
+      (job?.round_id && suppressedRoundIds.has(Number(job.round_id)));
+
+    if (wasPurgedByDayClose) {
+      insertPrintLog({
+        printer_id: job.printer_id,
+        printer_key: printerKey,
+        round_id: job.round_id,
+        job_id: job.id,
+        event_type: "discarded",
+        status: "warning",
+        message: `Discarded completed print for round ${job.round_id || "manual"} after day close`,
+        duration_ms: durationMs,
+      });
+      sendDashboardUpdate();
+      schedulePrintQueue(printerKey, 0);
+      return;
+    }
+
+    markPrintJobCompleted(job.id, durationMs);
+    mainWindow?.webContents.send(
+      "printedContent",
+      buildPrintedMeta({
+        ...payload,
+        printerId: job.printer_id || payload?.printerId,
+        printerKey,
+        printAttempts: Number(job?.attempts || 0) + 1,
+        clientToken: payload?.clientToken || buildClientToken(payload),
+      }),
+    );
+    insertPrintLog({
+      printer_id: job.printer_id,
+      printer_key: printerKey,
+      round_id: job.round_id,
+      job_id: job.id,
+      event_type: payload?.testMode ? "test-print" : "completed",
+      status: "success",
+      message: payload?.testMode
+        ? "Test print completed successfully"
+        : `Printed round ${job.round_id || "manual"} successfully`,
+      payload,
+      duration_ms: durationMs,
+    });
+    sendDashboardUpdate();
     schedulePrintQueue(printerKey, 0);
   } catch (error) {
     console.error("Print job failed:", error);
     const retryDelayMs = markPrintJobForRetry(job, error);
+    insertPrintLog({
+      printer_id: job.printer_id,
+      printer_key: printerKey,
+      round_id: job.round_id,
+      job_id: job.id,
+      event_type: "failed",
+      status: "error",
+      message: truncateErrorMessage(error),
+    });
+    sendDashboardUpdate();
     schedulePrintQueue(printerKey, retryDelayMs);
   } finally {
     activePrinterProcessors.delete(printerKey);
@@ -459,9 +1270,12 @@ async function processPrintQueue(printerKey) {
 
 async function performPrintJob(data) {
   const transport = resolvePrinterTransport(data);
+  const supportsCut = data?.supportsCut !== false;
+  const supportsBeep = data?.supportsBeep !== false;
+  const supportsQr = data?.supportsQr !== false;
   const options = {
     type: PrinterTypes[data.type],
-    characterSet: CharacterSet.PC852_LATIN2,
+    characterSet: resolveCharacterSet(data?.characterSet),
     removeSpecialCharacters: false,
     breakLine: BreakLine.WORD,
     options: {
@@ -497,7 +1311,12 @@ async function performPrintJob(data) {
   printer.alignLeft();
 
   const isReceipt = data?.order?.ebm_meta || data?.round?.origin === "RETAIL";
-  if (data?.round?.category === "ORDER") {
+  if (data?.testMode || data?.round?.category === "TEST") {
+    printer.println("TEST PRINT");
+    printer.println(`Printer: ${data?.printer || "Unknown"}`);
+    printer.println(`Interface: ${transport.uri}`);
+    printer.println(`Printed At: ${new Date().toLocaleString("en-US")}`);
+  } else if (data?.round?.category === "ORDER") {
     printer.println(
       `Order #: ${helper.generateVoucherNo(data?.round?.round_no)}(${
         data?.round?.destination
@@ -605,14 +1424,18 @@ async function performPrintJob(data) {
       printer.println(`Receipt Signature: ${invoiceMeta.rcptSign}`);
       printer.println(`MRC: ${invoiceMeta.mrcNo}`);
       printer.newLine();
-      printer.alignCenter();
-      printer.printQR(
-        `https://myrra.rra.gov.rw/common/link/ebm/receipt/indexEbmReceiptData?Data=${invoiceMeta.rcptSign}`,
-        {
-          cellSize: 3,
-          correction: "Q",
-        },
-      );
+      if (supportsQr) {
+        printer.alignCenter();
+        printer.printQR(
+          `https://myrra.rra.gov.rw/common/link/ebm/receipt/indexEbmReceiptData?Data=${invoiceMeta.rcptSign}`,
+          {
+            cellSize: 3,
+            correction: "Q",
+          },
+        );
+      } else {
+        printer.println(`QR: ${invoiceMeta.rcptSign}`);
+      }
       printer.println(`Powered by EBM v2.1`);
     } else {
       printer.alignRight();
@@ -649,16 +1472,19 @@ async function performPrintJob(data) {
     );
   }
 
-  printer.cut();
-  printer.beep();
+  if (supportsCut) {
+    printer.cut();
+  }
+
+  if (supportsBeep) {
+    printer.beep();
+  }
 
   await withTimeout(
     printer.execute(),
     PRINT_EXECUTION_TIMEOUT_MS,
     "Printer execution",
   );
-
-  mainWindow?.webContents.send("printedContent", buildPrintedMeta(data));
 }
 
 let mainWindow;
@@ -964,10 +1790,10 @@ function createWindow() {
   const iconPath = getIconPath();
 
   mainWindow = new BrowserWindow({
-    width: 590,
-    height: 410,
-    minWidth: 440,
-    minHeight: 300,
+    width: 760,
+    height: 720,
+    minWidth: 560,
+    minHeight: 420,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
@@ -1044,7 +1870,10 @@ function createWindow() {
   mainWindow.webContents.on("did-finish-load", async () => {
     try {
       const printers = await mainWindow.webContents.getPrintersAsync();
+      lastKnownSystemPrinters = printers;
+      invalidateStartupChecksCache();
       mainWindow.webContents.send("printersList", printers);
+      sendDashboardUpdate();
     } catch (error) {
       console.error("Failed to get printers:", error);
       mainWindow.webContents.send("printers-error", {
@@ -1109,10 +1938,9 @@ app.on("before-quit", async (event) => {
   }
 
   try {
-    if (printQueueTimer) {
-      clearTimeout(printQueueTimer);
-      printQueueTimer = null;
-    }
+    Array.from(printQueueTimers.keys()).forEach((printerKey) => {
+      clearPrintQueueTimer(printerKey);
+    });
 
     if (db) {
       db.close();
@@ -1148,7 +1976,8 @@ ipcMain.on("authenticated", async (event) => {
     const settings = db.prepare("SELECT * FROM settings LIMIT 1").get();
     const printers = db.prepare("SELECT * FROM printers").all();
     event.sender.send("availableSettings", { settings, printers }); // settings now always includes outlet_code
-    schedulePrintQueue(0);
+    scheduleAllPrintQueues();
+    sendDashboardUpdate();
   } catch (error) {
     console.error("Authentication error:", error);
     event.sender.send("auth-error", { message: "Failed to load settings" });
@@ -1235,6 +2064,206 @@ ipcMain.handle("print-content", async (event, data) => {
   }
 });
 
+ipcMain.handle("get-dashboard-data", async () => {
+  try {
+    return {
+      success: true,
+      dashboard: await getDashboardData(),
+    };
+  } catch (error) {
+    console.error("Get dashboard data error:", error);
+    return {
+      success: false,
+      message: "Failed to load dashboard data",
+    };
+  }
+});
+
+ipcMain.handle("sync-remote-print-state", async (event, data) => {
+  try {
+    return syncRemotePrintState(data);
+  } catch (error) {
+    console.error("Sync remote print state error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to synchronize remote print state",
+    };
+  }
+});
+
+ipcMain.handle("toggle-printer-pause", async (event, data) => {
+  try {
+    const printerId = Number(data?.printerId);
+    if (!printerId) {
+      throw new Error("Printer id is required");
+    }
+
+    const paused = boolToInt(Boolean(data?.paused), 0);
+    db.prepare("UPDATE printers SET paused = ? WHERE id = ?").run(
+      paused,
+      printerId,
+    );
+    invalidateStartupChecksCache();
+
+    const printer = getPrinterRecordById(printerId);
+    if (!printer) {
+      throw new Error("Printer not found");
+    }
+
+    if (!paused) {
+      schedulePrintQueue(`printer:${printerId}`, 0);
+    }
+
+    insertPrintLog({
+      printer_id: printerId,
+      printer_key: `printer:${printerId}`,
+      event_type: "pause-toggle",
+      status: paused ? "warning" : "success",
+      message: paused
+        ? `${printer.name} was paused`
+        : `${printer.name} resumed`,
+    });
+
+    sendDashboardUpdate();
+
+    return { success: true, printer: mapPrinterForUi(printer) };
+  } catch (error) {
+    console.error("Toggle printer pause error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to update printer pause state",
+    };
+  }
+});
+
+ipcMain.handle("retry-print-job", async (event, jobId) => {
+  try {
+    const id = Number(jobId);
+    if (!id) {
+      throw new Error("Job id is required");
+    }
+
+    const job = db.prepare("SELECT * FROM print_jobs WHERE id = ?").get(id);
+    if (!job) {
+      throw new Error("Print job not found");
+    }
+    if (job.status === PRINT_JOB_STATUS.PROCESSING) {
+      throw new Error("This print job is already processing");
+    }
+
+    const now = nowIsoString();
+    db.prepare(
+      `
+        UPDATE print_jobs
+        SET status = ?, next_retry_at = ?, updated_at = ?, locked_at = NULL
+        WHERE id = ?
+      `,
+    ).run(PRINT_JOB_STATUS.PENDING, now, now, id);
+
+    insertPrintLog({
+      printer_id: job.printer_id,
+      printer_key: job.printer_key,
+      round_id: job.round_id,
+      job_id: job.id,
+      event_type: "manual-retry",
+      status: "info",
+      message: `Manual retry requested for job ${job.id}`,
+    });
+
+    schedulePrintQueue(job.printer_key, 0);
+    sendDashboardUpdate();
+
+    return { success: true };
+  } catch (error) {
+    console.error("Retry print job error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to retry print job",
+    };
+  }
+});
+
+ipcMain.handle("clear-print-job", async (event, jobId) => {
+  try {
+    const id = Number(jobId);
+    if (!id) {
+      throw new Error("Job id is required");
+    }
+
+    const job = db.prepare("SELECT * FROM print_jobs WHERE id = ?").get(id);
+    if (!job) {
+      throw new Error("Print job not found");
+    }
+    if (job.status === PRINT_JOB_STATUS.PROCESSING) {
+      throw new Error("Wait for the current print attempt to finish before clearing this job");
+    }
+
+    db.prepare("DELETE FROM print_jobs WHERE id = ?").run(id);
+
+    insertPrintLog({
+      printer_id: job.printer_id,
+      printer_key: job.printer_key,
+      round_id: job.round_id,
+      job_id: job.id,
+      event_type: "manual-clear",
+      status: "warning",
+      message: `Job ${job.id} was cleared manually`,
+    });
+
+    schedulePrintQueue(job.printer_key, 0);
+    sendDashboardUpdate();
+
+    return { success: true };
+  } catch (error) {
+    console.error("Clear print job error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to clear print job",
+    };
+  }
+});
+
+ipcMain.handle("run-test-print", async (event, printerId) => {
+  try {
+    const id = Number(printerId);
+    if (!id) {
+      throw new Error("Printer id is required");
+    }
+
+    const printer = getPrinterRecordById(id);
+    if (!printer) {
+      throw new Error("Printer not found");
+    }
+    if (printer.paused) {
+      throw new Error("Resume the printer before running a test print");
+    }
+
+    const payload = buildTestPrintPayload({
+      printerId: printer.id,
+      printer: printer.name,
+      type: printer.type,
+      interface: printer.interface,
+      port: printer.port,
+      ip: printer.ip,
+      supportsCut: Boolean(printer.supports_cut),
+      supportsBeep: Boolean(printer.supports_beep),
+      supportsQr: Boolean(printer.supports_qr),
+      characterSet: printer.character_set,
+    });
+
+    const result = enqueuePrintJob(payload);
+    sendDashboardUpdate();
+
+    return { success: true, result };
+  } catch (error) {
+    console.error("Run test print error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to queue test print",
+    };
+  }
+});
+
 ipcMain.handle("add-printer", async (event, printer) => {
   try {
     if (!printer || !printer.type || !printer.interface) {
@@ -1260,7 +2289,7 @@ ipcMain.handle("add-printer", async (event, printer) => {
     if (id) {
       const stmt = db.prepare(`
         UPDATE printers 
-        SET name = ?, type = ?, ip = ?, port = ?, interface = ?, content = ?
+        SET name = ?, type = ?, ip = ?, port = ?, interface = ?, content = ?, paused = ?, supports_cut = ?, supports_beep = ?, supports_qr = ?, character_set = ?
         WHERE id = ?
       `);
       stmt.run(
@@ -1270,13 +2299,18 @@ ipcMain.handle("add-printer", async (event, printer) => {
         printer.port,
         printer.interface,
         printer.content,
+        boolToInt(printer.paused, 0),
+        boolToInt(printer.supports_cut, 1),
+        boolToInt(printer.supports_beep, 1),
+        boolToInt(printer.supports_qr, 1),
+        printer.character_set || DEFAULT_PRINTER_CHARACTER_SET,
         id,
       );
       result = db.prepare("SELECT * FROM printers WHERE id = ?").get(id);
     } else {
       const stmt = db.prepare(`
-        INSERT INTO printers (name, type, ip, port, interface, content)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO printers (name, type, ip, port, interface, content, paused, supports_cut, supports_beep, supports_qr, character_set)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const info = stmt.run(
         printer.name,
@@ -1285,6 +2319,11 @@ ipcMain.handle("add-printer", async (event, printer) => {
         printer.port,
         printer.interface,
         printer.content,
+        boolToInt(printer.paused, 0),
+        boolToInt(printer.supports_cut, 1),
+        boolToInt(printer.supports_beep, 1),
+        boolToInt(printer.supports_qr, 1),
+        printer.character_set || DEFAULT_PRINTER_CHARACTER_SET,
       );
       result = db
         .prepare("SELECT * FROM printers WHERE id = ?")
@@ -1292,7 +2331,10 @@ ipcMain.handle("add-printer", async (event, printer) => {
     }
 
     if (result) {
+      invalidateStartupChecksCache();
       mainWindow?.webContents.send("recordSaved", { type: "printer", result });
+      scheduleAllPrintQueues();
+      sendDashboardUpdate();
       return { success: true, result };
     }
     return { success: false, message: "Failed to save printer" };
@@ -1312,11 +2354,13 @@ ipcMain.handle("delete-printer", async (event, printerId) => {
     }
 
     db.prepare("DELETE FROM printers WHERE id = ?").run(printerId);
+    invalidateStartupChecksCache();
 
     mainWindow?.webContents.send("recordSaved", {
       type: "printer-deleted",
       result: printerId,
     });
+    sendDashboardUpdate();
 
     return { success: true, id: printerId };
   } catch (error) {

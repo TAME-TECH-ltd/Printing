@@ -52,7 +52,19 @@ const PRINTER_TYPES = {
 
 const PRINTER_INTERFACES = {
   TCP: "TCP",
+  USB: "USB",
 };
+
+const CHARACTER_SET_OPTIONS = [
+  { value: "PC852_LATIN2", label: "Latin 2 (Default)" },
+  { value: "PC437_USA", label: "USA" },
+  { value: "PC850_MULTILINGUAL", label: "Multilingual" },
+  { value: "WPC1252", label: "Windows 1252" },
+  { value: "ISO8859_2_LATIN2", label: "ISO Latin 2" },
+  { value: "PC858_EURO", label: "Euro" },
+];
+const REMOTE_METRICS_REFRESH_MS = 30000;
+const ACTIVE_QUEUE_REMOTE_REFRESH_MS = 5000;
 
 const CONTENT_TYPES = {
   K: "Kitchen Orders",
@@ -203,6 +215,34 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
     return state.retryDelay;
   };
 
+  const syncRemotePrintState = async (payload = null) => {
+    const systemDate =
+      payload?.system_date ||
+      payload?.systemDate ||
+      payload?.print_state?.system_date ||
+      null;
+    const dayToken =
+      payload?.print_day_token ||
+      payload?.dayToken ||
+      payload?.print_state?.print_day_token ||
+      payload?.print_state?.day_token ||
+      null;
+
+    if (!systemDate && !dayToken) {
+      return null;
+    }
+
+    try {
+      return await window.electronAPI.invoke("sync-remote-print-state", {
+        systemDate,
+        dayToken,
+      });
+    } catch (error) {
+      console.error("Failed to synchronize remote print state:", error);
+      return null;
+    }
+  };
+
   const getRateLimitDelay = (error) => {
     const status = error?.response?.status;
     if (status !== 429) return null;
@@ -266,6 +306,9 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
     const filters = {};
     if (requestMeta.latest) filters.latest = requestMeta.latest;
     if (requestMeta.content) filters.content = requestMeta.content;
+    if (requestMeta.clientToken) filters.client_token = requestMeta.clientToken;
+    if (requestMeta.printAttempts)
+      filters.print_attempts = requestMeta.printAttempts;
     if (Object.keys(filters).length > 0) {
       _url = encodeQuery(_url, filters);
     }
@@ -275,6 +318,7 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
 
     try {
       const response = await axios.get(_url);
+      await syncRemotePrintState(response.data);
       const { status, order, items } = response.data || {};
       resetRetryDelay(printerKey);
       const nextMeta = removeLatestFromMeta(requestMeta);
@@ -391,6 +435,7 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
     stopFetching,
     resumeFetching,
     pruneWorkerStates,
+    syncRemotePrintState,
   };
 };
 
@@ -443,10 +488,44 @@ const App = {
     const isAuthenticating = ref(false);
     const isAuthenticated = ref(false);
     const showApiConfig = ref(false);
+    const showServiceHealth = ref(false);
+    const showQueuePanel = ref(false);
+    const showRecentActivity = ref(false);
     const isSavingPrinter = ref(false);
     const isDeletingPrinter = ref(false);
     const systemInfo = ref(null);
     const showSystemInfo = ref(false);
+    const dashboard = ref({
+      summary: {
+        totalJobs: 0,
+        pendingJobs: 0,
+        processingJobs: 0,
+        retryJobs: 0,
+        oldestPendingAtLabel: null,
+      },
+      startupChecks: [],
+      printers: [],
+      queuedJobs: [],
+      recentLogs: [],
+      remoteMetrics: {
+        status: "info",
+        message: "Waiting for API metrics",
+        pendingRounds: 0,
+        oldestPendingAt: null,
+        oldestPendingAtLabel: null,
+        orderRounds: 0,
+        invoiceRounds: 0,
+        kitchenRounds: 0,
+        barRounds: 0,
+        checkedAt: null,
+        checkedAtLabel: null,
+      },
+    });
+    const isRefreshingDashboard = ref(false);
+    const dashboardTimer = ref(null);
+    const lastRemoteMetricsFetchAt = ref(0);
+    const printerActionState = ref({});
+    const jobActionState = ref({});
 
     const selectedPrinter = ref("");
     const selectedPrinterId = ref(null);
@@ -455,6 +534,10 @@ const App = {
     const printerType = ref(PRINTER_TYPES.EPSON);
     const printerInterface = ref(PRINTER_INTERFACES.TCP);
     const content = ref([]);
+    const supportsCut = ref(true);
+    const supportsBeep = ref(true);
+    const supportsQr = ref(true);
+    const printerCharacterSet = ref("PC852_LATIN2");
 
     const printerForm = ref({
       ipAddress: "",
@@ -464,6 +547,11 @@ const App = {
       name: "",
       id: null,
       content: [],
+      paused: false,
+      supportsCut: true,
+      supportsBeep: true,
+      supportsQr: true,
+      characterSet: "PC852_LATIN2",
     });
 
     const { isLoading, setupInterceptors } = useApiClient();
@@ -476,11 +564,182 @@ const App = {
       stopFetching,
       resumeFetching,
       pruneWorkerStates,
+      syncRemotePrintState,
     } = useFetchingService(url, activePrinters, appSettings, outletCode);
 
     const roundsUrl = computed(() => {
       return url.value ? "next-printable-round" : null;
     });
+
+    const setPrinterActionLoading = (printerId, key, value) => {
+      if (!printerId) return;
+      if (!printerActionState.value[printerId]) {
+        printerActionState.value[printerId] = {};
+      }
+      printerActionState.value[printerId][key] = value;
+    };
+
+    const setJobActionLoading = (jobId, value) => {
+      if (!jobId) return;
+      jobActionState.value[jobId] = value;
+    };
+
+    const isPrinterActionLoading = (printerId, key) => {
+      return Boolean(printerActionState.value[printerId]?.[key]);
+    };
+
+    const isJobActionLoading = (jobId) => {
+      return Boolean(jobActionState.value[jobId]);
+    };
+
+    const buildRemoteMetricsUrl = () => {
+      if (!url.value) return null;
+      return outletCode.value
+        ? addBkendIfProduction(
+            url.value,
+            `/api/print-queue-metrics/${outletCode.value}`,
+          )
+        : addBkendIfProduction(url.value, "/api/print-queue-metrics");
+    };
+
+    const refreshRemoteQueueMetrics = async ({
+      force = false,
+      silent = true,
+    } = {}) => {
+      const requestUrl = buildRemoteMetricsUrl();
+      const hasActiveLocalQueue =
+        Number(dashboard.value.summary?.pendingJobs || 0) > 0 ||
+        Number(dashboard.value.summary?.processingJobs || 0) > 0;
+      const refreshWindow = hasActiveLocalQueue
+        ? ACTIVE_QUEUE_REMOTE_REFRESH_MS
+        : REMOTE_METRICS_REFRESH_MS;
+
+      if (!requestUrl) {
+        dashboard.value.remoteMetrics = {
+          ...dashboard.value.remoteMetrics,
+          status: "warning",
+          message: "Server URL is not configured",
+          checkedAt: null,
+          checkedAtLabel: null,
+        };
+        return;
+      }
+
+      if (
+        !force &&
+        lastRemoteMetricsFetchAt.value &&
+        Date.now() - lastRemoteMetricsFetchAt.value < refreshWindow
+      ) {
+        return;
+      }
+
+      try {
+        const response = await axios.get(requestUrl);
+        await syncRemotePrintState(response.data);
+        const metrics = response?.data?.metrics || {};
+        const checkedAt = new Date().toISOString();
+        lastRemoteMetricsFetchAt.value = Date.now();
+        dashboard.value.remoteMetrics = {
+          status: response?.data?.status ? "ok" : "warning",
+          message: response?.data?.status
+            ? `${Number(metrics.pending_rounds || 0)} pending round(s) on the API`
+            : "API queue metrics are unavailable",
+          pendingRounds: Number(metrics.pending_rounds || 0),
+          oldestPendingAt: metrics.oldest_pending_at || null,
+          oldestPendingAtLabel: metrics.oldest_pending_at
+            ? new Date(metrics.oldest_pending_at).toLocaleString("en-US")
+            : null,
+          orderRounds: Number(metrics.order_rounds || 0),
+          invoiceRounds: Number(metrics.invoice_rounds || 0),
+          kitchenRounds: Number(metrics.kitchen_rounds || 0),
+          barRounds: Number(metrics.bar_rounds || 0),
+          checkedAt,
+          checkedAtLabel: new Date(checkedAt).toLocaleString("en-US"),
+        };
+      } catch (error) {
+        dashboard.value.remoteMetrics = {
+          ...dashboard.value.remoteMetrics,
+          status: error?.response?.status === 429 ? "warning" : "danger",
+          message:
+            error?.response?.status === 429
+              ? "API queue metrics are rate limited"
+              : `API metrics check failed: ${error.message || "Unknown error"}`,
+          checkedAt: new Date().toISOString(),
+          checkedAtLabel: new Date().toLocaleString("en-US"),
+        };
+
+        if (!silent) {
+          toggleFlashMessage({
+            type: "warning",
+            text:
+              error?.response?.status === 429
+                ? "API metrics are temporarily rate limited"
+                : "Failed to load API queue metrics",
+          });
+        }
+      }
+    };
+
+    const refreshDashboard = async (silent = true) => {
+      if (isRefreshingDashboard.value) return;
+
+      isRefreshingDashboard.value = true;
+
+      try {
+        const previousRemoteMetrics = dashboard.value.remoteMetrics || null;
+        const response = await window.electronAPI.invoke("get-dashboard-data");
+        if (response?.success && response.dashboard) {
+          dashboard.value = response.dashboard;
+          dashboard.value.remoteMetrics = previousRemoteMetrics || {
+            status: "info",
+            message: "Waiting for API metrics",
+            pendingRounds: 0,
+            oldestPendingAt: null,
+            oldestPendingAtLabel: null,
+            orderRounds: 0,
+            invoiceRounds: 0,
+            kitchenRounds: 0,
+            barRounds: 0,
+            checkedAt: null,
+            checkedAtLabel: null,
+          };
+          if (Array.isArray(response.dashboard.printers)) {
+            activePrinters.value = response.dashboard.printers.map((printer) => ({
+              ...printer,
+            }));
+          }
+          await refreshRemoteQueueMetrics({
+            force: !silent,
+            silent,
+          });
+        } else if (!silent) {
+          toggleFlashMessage({
+            type: "error",
+            text: response?.message || "Failed to load dashboard",
+          });
+        }
+      } catch (error) {
+        console.error("Failed to refresh dashboard:", error);
+        if (!silent) {
+          toggleFlashMessage({
+            type: "error",
+            text: "Failed to load printer dashboard",
+          });
+        }
+      } finally {
+        isRefreshingDashboard.value = false;
+      }
+    };
+
+    const scheduleDashboardRefresh = () => {
+      if (dashboardTimer.value) {
+        clearInterval(dashboardTimer.value);
+      }
+
+      dashboardTimer.value = setInterval(() => {
+        refreshDashboard(true);
+      }, 5000);
+    };
 
     const eventHandlers = {
       printersList: (_printers) => {
@@ -490,6 +749,7 @@ const App = {
       printedContent: (meta) => {
         setTimeout(() => {
           resumeFetching(meta);
+          refreshDashboard(true);
         }, 50);
       },
 
@@ -542,6 +802,8 @@ const App = {
         if (settings && Object.keys(settings).length > 0) {
           url.value = settings.base_url;
           outletCode.value = settings.outlet_code || "";
+          lastRemoteMetricsFetchAt.value = 0;
+          refreshDashboard(true);
           axios
             .get(
               addBkendIfProduction(
@@ -553,9 +815,11 @@ const App = {
             )
             .then((response) => {
               appSettings.value = response?.data?.company;
+              syncRemotePrintState(response?.data);
               if (activePrinters.value.length) {
                 resumeFetching();
               }
+              refreshDashboard(true);
             })
             .catch((error) => {
               console.error("Failed to load settings:", error);
@@ -564,6 +828,8 @@ const App = {
                 text: "Failed to load application settings",
               });
             });
+        } else {
+          refreshDashboard(true);
         }
       },
 
@@ -574,6 +840,23 @@ const App = {
           type: "error",
           text: `Printing failed: ${errorInfo.message}.${details}`,
         });
+        refreshDashboard(true);
+      },
+
+      "dashboard-updated": () => {
+        refreshDashboard(true);
+      },
+
+      "queue-reset": (data) => {
+        toggleFlashMessage({
+          type: "warning",
+          text:
+            data?.purgedJobs > 0
+              ? `Day closed on ${data?.systemDate || "server"}. Cleared ${data.purgedJobs} queued print job(s).`
+              : "Day closed. Local print queue was reset.",
+        });
+        refreshDashboard(true);
+        resumeFetching();
       },
     };
 
@@ -610,10 +893,16 @@ const App = {
       window.electronAPI.send("authenticated");
 
       loadSystemInfo();
+      refreshDashboard(true);
+      scheduleDashboardRefresh();
     });
 
     onUnmounted(() => {
       stopFetching();
+      if (dashboardTimer.value) {
+        clearInterval(dashboardTimer.value);
+        dashboardTimer.value = null;
+      }
       cleanupEventListeners();
       clearMessage();
     });
@@ -639,6 +928,10 @@ const App = {
       printerType.value = PRINTER_TYPES.EPSON;
       printerInterface.value = PRINTER_INTERFACES.TCP;
       content.value = [];
+      supportsCut.value = true;
+      supportsBeep.value = true;
+      supportsQr.value = true;
+      printerCharacterSet.value = "PC852_LATIN2";
 
       printerForm.value = {
         ipAddress: "",
@@ -648,6 +941,11 @@ const App = {
         name: "",
         id: null,
         content: [],
+        paused: false,
+        supportsCut: true,
+        supportsBeep: true,
+        supportsQr: true,
+        characterSet: "PC852_LATIN2",
       };
     };
 
@@ -661,6 +959,11 @@ const App = {
         ip: printerIpAddress.value || printerForm.value.ipAddress,
         port: printerPort.value || printerForm.value.port,
         interface: printerInterface.value || printerForm.value.interface,
+        paused: printerForm.value.paused || false,
+        supports_cut: supportsCut.value,
+        supports_beep: supportsBeep.value,
+        supports_qr: supportsQr.value,
+        character_set: printerCharacterSet.value || "PC852_LATIN2",
         content: JSON.stringify(
           content.value.length ? content.value : printerForm.value.content,
         ),
@@ -691,6 +994,11 @@ const App = {
         printerPort.value = printer.port;
         printerInterface.value = printer.interface;
         content.value = JSON.parse(printer.content);
+        supportsCut.value = Boolean(printer.supports_cut ?? 1);
+        supportsBeep.value = Boolean(printer.supports_beep ?? 1);
+        supportsQr.value = Boolean(printer.supports_qr ?? 1);
+        printerCharacterSet.value =
+          printer.character_set || "PC852_LATIN2";
 
         printerForm.value = {
           id: printer.id,
@@ -700,6 +1008,11 @@ const App = {
           port: printer.port,
           interface: printer.interface,
           content: JSON.parse(printer.content),
+          paused: Boolean(printer.paused ?? 0),
+          supportsCut: Boolean(printer.supports_cut ?? 1),
+          supportsBeep: Boolean(printer.supports_beep ?? 1),
+          supportsQr: Boolean(printer.supports_qr ?? 1),
+          characterSet: printer.character_set || "PC852_LATIN2",
         };
       } else {
         resetForm();
@@ -788,6 +1101,18 @@ const App = {
       showApiConfig.value = !showApiConfig.value;
     };
 
+    const toggleServiceHealth = () => {
+      showServiceHealth.value = !showServiceHealth.value;
+    };
+
+    const toggleQueuePanel = () => {
+      showQueuePanel.value = !showQueuePanel.value;
+    };
+
+    const toggleRecentActivity = () => {
+      showRecentActivity.value = !showRecentActivity.value;
+    };
+
     const testConnection = () => {
       if (!url.value) {
         toggleFlashMessage({
@@ -846,6 +1171,157 @@ const App = {
       showSystemInfo.value = !showSystemInfo.value;
     };
 
+    const togglePrinterPause = async (printer) => {
+      if (!printer?.id) return;
+
+      const nextPaused = !printer.paused;
+      setPrinterActionLoading(printer.id, "pause", true);
+
+      try {
+        const response = await window.electronAPI.invoke("toggle-printer-pause", {
+          printerId: printer.id,
+          paused: nextPaused,
+        });
+
+        if (!response?.success) {
+          throw new Error(response?.message || "Failed to update printer");
+        }
+
+        toggleFlashMessage({
+          type: nextPaused ? "warning" : "success",
+          text: nextPaused
+            ? `${printer.name} paused`
+            : `${printer.name} resumed`,
+        });
+
+        await refreshDashboard(true);
+
+        if (nextPaused) {
+          stopFetching(`printer:${printer.id}`);
+        } else {
+          resumeFetching({ printerId: printer.id });
+        }
+      } catch (error) {
+        console.error("Failed to toggle printer pause:", error);
+        toggleFlashMessage({
+          type: "error",
+          text: error.message || "Failed to update printer pause state",
+        });
+      } finally {
+        setPrinterActionLoading(printer.id, "pause", false);
+      }
+    };
+
+    const runTestPrint = async (printer) => {
+      if (!printer?.id) return;
+
+      setPrinterActionLoading(printer.id, "test", true);
+
+      try {
+        const response = await window.electronAPI.invoke(
+          "run-test-print",
+          printer.id,
+        );
+
+        if (!response?.success) {
+          throw new Error(response?.message || "Failed to queue test print");
+        }
+
+        toggleFlashMessage({
+          type: "info",
+          text: `Test print queued for ${printer.name}`,
+        });
+        await refreshDashboard(true);
+      } catch (error) {
+        console.error("Failed to run test print:", error);
+        toggleFlashMessage({
+          type: "error",
+          text: error.message || "Failed to run test print",
+        });
+      } finally {
+        setPrinterActionLoading(printer.id, "test", false);
+      }
+    };
+
+    const retryPrintJob = async (job) => {
+      if (!job?.id) return;
+
+      setJobActionLoading(job.id, true);
+
+      try {
+        const response = await window.electronAPI.invoke(
+          "retry-print-job",
+          job.id,
+        );
+
+        if (!response?.success) {
+          throw new Error(response?.message || "Failed to retry job");
+        }
+
+        toggleFlashMessage({
+          type: "info",
+          text: `Retry requested for job #${job.id}`,
+        });
+        await refreshDashboard(true);
+      } catch (error) {
+        console.error("Failed to retry print job:", error);
+        toggleFlashMessage({
+          type: "error",
+          text: error.message || "Failed to retry print job",
+        });
+      } finally {
+        setJobActionLoading(job.id, false);
+      }
+    };
+
+    const clearPrintJob = async (job) => {
+      if (!job?.id) return;
+
+      if (!confirm(`Clear queued job #${job.id}?`)) {
+        return;
+      }
+
+      setJobActionLoading(job.id, true);
+
+      try {
+        const response = await window.electronAPI.invoke(
+          "clear-print-job",
+          job.id,
+        );
+
+        if (!response?.success) {
+          throw new Error(response?.message || "Failed to clear job");
+        }
+
+        toggleFlashMessage({
+          type: "warning",
+          text: `Job #${job.id} cleared`,
+        });
+        await refreshDashboard(true);
+      } catch (error) {
+        console.error("Failed to clear print job:", error);
+        toggleFlashMessage({
+          type: "error",
+          text: error.message || "Failed to clear print job",
+        });
+      } finally {
+        setJobActionLoading(job.id, false);
+      }
+    };
+
+    const getCheckClass = (status) => {
+      switch (status) {
+        case "ok":
+          return "success";
+        case "warning":
+          return "warning";
+        case "danger":
+          return "danger";
+        default:
+          return "info";
+      }
+    };
+
     const buildUrlWithOutlet = (base, path) => {
       if (outletCode.value) {
         path = path.endsWith("/") ? path.slice(0, -1) : path;
@@ -865,11 +1341,16 @@ const App = {
       isAuthenticating,
       isAuthenticated,
       showApiConfig,
+      showServiceHealth,
+      showQueuePanel,
+      showRecentActivity,
       isSavingPrinter,
       isDeletingPrinter,
       systemInfo,
       showSystemInfo,
       outletCode,
+      dashboard,
+      isRefreshingDashboard,
 
       selectedPrinter,
       selectedPrinterId,
@@ -878,6 +1359,10 @@ const App = {
       printerType,
       printerInterface,
       content,
+      supportsCut,
+      supportsBeep,
+      supportsQr,
+      printerCharacterSet,
 
       printerForm,
 
@@ -893,6 +1378,7 @@ const App = {
       DISPLAY_MODES,
       PRINTER_TYPES,
       PRINTER_INTERFACES,
+      CHARACTER_SET_OPTIONS,
 
       resetForm,
       setPrinter,
@@ -904,8 +1390,19 @@ const App = {
       handleLogout,
       testConnection,
       toggleApiConfig,
+      toggleServiceHealth,
+      toggleQueuePanel,
+      toggleRecentActivity,
       toggleSystemInfo,
       loadSystemInfo,
+      refreshDashboard,
+      togglePrinterPause,
+      runTestPrint,
+      retryPrintJob,
+      clearPrintJob,
+      isPrinterActionLoading,
+      isJobActionLoading,
+      getCheckClass,
       startFetching,
       stopFetching,
       resumeFetching,
