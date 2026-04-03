@@ -569,9 +569,10 @@ const App = {
 
       "print-error": (errorInfo) => {
         console.error("Print error:", errorInfo);
+        const details = errorInfo?.error ? ` ${errorInfo.error}` : "";
         toggleFlashMessage({
           type: "error",
-          text: `Printing failed: ${errorInfo.message}. Check system compatibility.`,
+          text: `Printing failed: ${errorInfo.message}.${details}`,
         });
       },
     };

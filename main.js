@@ -137,12 +137,7 @@ function recoverInterruptedPrintJobs() {
       SET status = ?, locked_at = NULL, next_retry_at = COALESCE(next_retry_at, ?), updated_at = ?
       WHERE status = ?
     `,
-  ).run(
-    PRINT_JOB_STATUS.PENDING,
-    now,
-    now,
-    PRINT_JOB_STATUS.PROCESSING,
-  );
+  ).run(PRINT_JOB_STATUS.PENDING, now, now, PRINT_JOB_STATUS.PROCESSING);
 }
 
 function clearPrintQueueTimer(printerKey) {
@@ -212,6 +207,43 @@ function withTimeout(promise, timeoutMs, label) {
       }, timeoutMs);
     }),
   ]);
+}
+
+function resolvePrinterTransport(data = {}) {
+  const interfaceType = String(data.interface || "").toUpperCase();
+
+  if (data.ip) {
+    const port = String(data.port || "").trim();
+    return {
+      uri: port ? `tcp://${data.ip}:${port}` : `tcp://${data.ip}`,
+      shouldCheckConnection: true,
+    };
+  }
+
+  if (interfaceType === "USB") {
+    const sharedName = String(data.port || data.printer || "").trim();
+    if (!sharedName) {
+      throw new Error("Missing shared printer name");
+    }
+
+    const normalizedName = sharedName.replace(/^[/\\]+/, "");
+    return {
+      uri: `\\\\localhost\\${normalizedName}`,
+      // UNC path existence checks are unreliable on some Windows setups.
+      // For shared printers, treat execute() as the source of truth.
+      shouldCheckConnection: false,
+    };
+  }
+
+  const rawInterface = String(data.port || "").trim();
+  if (!rawInterface) {
+    throw new Error("Missing printer interface");
+  }
+
+  return {
+    uri: rawInterface,
+    shouldCheckConnection: true,
+  };
 }
 
 function enqueuePrintJob(data = {}) {
@@ -301,15 +333,7 @@ function enqueuePrintJob(data = {}) {
         VALUES (?, ?, ?, ?, 0, ?, ?, ?)
       `,
     )
-    .run(
-      roundId,
-      printerKey,
-      payload,
-      PRINT_JOB_STATUS.PENDING,
-      now,
-      now,
-      now,
-    );
+    .run(roundId, printerKey, payload, PRINT_JOB_STATUS.PENDING, now, now, now);
 
   schedulePrintQueue(printerKey, 0);
 
@@ -380,18 +404,12 @@ function markPrintJobForRetry(job, error) {
       SET status = ?, attempts = ?, last_error = ?, locked_at = NULL, next_retry_at = ?, updated_at = ?
       WHERE id = ?
     `,
-  ).run(
-    PRINT_JOB_STATUS.PENDING,
-    attempts,
-    message,
-    retryAt,
-    now,
-    job.id,
-  );
+  ).run(PRINT_JOB_STATUS.PENDING, attempts, message, retryAt, now, job.id);
 
   if (attempts === 1 || attempts % 5 === 0) {
     mainWindow?.webContents.send("print-error", {
       message: `Print failed. Retrying in ${Math.round(retryDelayMs / 1000)}s.`,
+      error: message,
       attempts,
       roundId: job?.round_id || null,
     });
@@ -414,7 +432,10 @@ async function processPrintQueue(printerKey) {
   if (!job) {
     const futureJob = getNextQueuedPrintJob(printerKey, true);
     if (futureJob) {
-      schedulePrintQueue(printerKey, getRetryDelayUntil(futureJob.next_retry_at));
+      schedulePrintQueue(
+        printerKey,
+        getRetryDelayUntil(futureJob.next_retry_at),
+      );
     }
     return;
   }
@@ -437,6 +458,7 @@ async function processPrintQueue(printerKey) {
 }
 
 async function performPrintJob(data) {
+  const transport = resolvePrinterTransport(data);
   const options = {
     type: PrinterTypes[data.type],
     characterSet: CharacterSet.PC852_LATIN2,
@@ -445,23 +467,20 @@ async function performPrintJob(data) {
     options: {
       timeout: 10000,
     },
+    interface: transport.uri,
   };
 
-  if (data.ip) {
-    options.interface = `tcp://${data.ip}`;
-  } else {
-    options.interface = `//localhost/${data.port}`;
-  }
-
   const printer = new ThermalPrinter(options);
-  const isConnected = await withTimeout(
-    printer.isPrinterConnected(),
-    PRINT_EXECUTION_TIMEOUT_MS,
-    "Printer connection check",
-  );
+  if (transport.shouldCheckConnection) {
+    const isConnected = await withTimeout(
+      printer.isPrinterConnected(),
+      PRINT_EXECUTION_TIMEOUT_MS,
+      "Printer connection check",
+    );
 
-  if (!isConnected) {
-    throw new Error("Printer is not connected");
+    if (!isConnected) {
+      throw new Error(`Printer is not connected (${transport.uri})`);
+    }
   }
 
   printer.alignCenter();
@@ -1090,9 +1109,10 @@ app.on("before-quit", async (event) => {
   }
 
   try {
-    Array.from(printQueueTimers.keys()).forEach((printerKey) => {
-      clearPrintQueueTimer(printerKey);
-    });
+    if (printQueueTimer) {
+      clearTimeout(printQueueTimer);
+      printQueueTimer = null;
+    }
 
     if (db) {
       db.close();
@@ -1128,7 +1148,7 @@ ipcMain.on("authenticated", async (event) => {
     const settings = db.prepare("SELECT * FROM settings LIMIT 1").get();
     const printers = db.prepare("SELECT * FROM printers").all();
     event.sender.send("availableSettings", { settings, printers }); // settings now always includes outlet_code
-    scheduleAllPrintQueues();
+    schedulePrintQueue(0);
   } catch (error) {
     console.error("Authentication error:", error);
     event.sender.send("auth-error", { message: "Failed to load settings" });
