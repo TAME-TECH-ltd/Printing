@@ -1824,7 +1824,7 @@ function createWindow() {
     }
   }
 
-  mainWindow.setTitle("Printing Service v1.2.2");
+  mainWindow.setTitle(`Printing Service v${app.getVersion()}`);
 
   mainWindow.loadFile("index.html");
 
