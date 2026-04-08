@@ -41,6 +41,22 @@ function addBkendIfProduction(baseUrl, path) {
   return `${baseUrl}${insertPath}`;
 }
 
+function safeJsonParse(value, fallback = null) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
 const DISPLAY_MODES = {
   PRINTERS_VIEW: "PRINTERS_VIEW",
   FORM_VIEW: "FORM_VIEW",
@@ -66,26 +82,51 @@ const CHARACTER_SET_OPTIONS = [
 const REMOTE_METRICS_REFRESH_MS = 30000;
 const ACTIVE_QUEUE_REMOTE_REFRESH_MS = 5000;
 
-const CONTENT_TYPES = {
-  K: "Kitchen Orders",
-  B: "Bard Orders",
-  I: "Invoices",
-  KB: "Kitchen & Bar Orders",
-  BK: "Kitchen & Bar Orders",
-  KI: "Kitchen Orders & Invoices",
-  IK: "Kitchen Orders & Invoices",
-  BI: "BAR & Invoices",
-  IB: "BAR & Invoices",
+const INVOICE_CONTENT_CODE = "I";
+const BASE_CONTENT_OPTIONS = [
+  { code: INVOICE_CONTENT_CODE, name: "Invoices", type: "invoice" },
+];
+
+const normalizeContentCode = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+
+  const normalized = String(value)
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+
+  if (!normalized) return null;
+  if (normalized === "INVOICE" || normalized === "INVOICES") return INVOICE_CONTENT_CODE;
+
+  return normalized;
 };
 
-const CONTENT_PRIORITY = ["K", "B", "I"];
+const formatContentLabel = (value) => {
+  return String(value || "Unknown")
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+};
+
+const buildContentOptions = (destinations = []) => {
+  const destinationOptions = Array.isArray(destinations)
+    ? destinations
+        .map((destination) => ({
+          code: normalizeContentCode(destination.code),
+          name: destination.name || formatContentLabel(destination.code),
+          type: "destination",
+        }))
+        .filter((option) => option.code)
+    : [];
+
+  return [...destinationOptions, ...BASE_CONTENT_OPTIONS];
+};
 
 const extractPrintableContentCodes = (rawContent) => {
   if (!rawContent) return [];
 
   if (Array.isArray(rawContent)) {
-    const normalizedItems = rawContent.map((item) => String(item).toUpperCase());
-    return CONTENT_PRIORITY.filter((code) => normalizedItems.includes(code));
+    return [...new Set(rawContent.map(normalizeContentCode).filter(Boolean))];
   }
 
   let normalized = rawContent;
@@ -101,12 +142,19 @@ const extractPrintableContentCodes = (rawContent) => {
     }
   }
 
-  const value = String(normalized).toUpperCase();
-  return CONTENT_PRIORITY.filter((code) => value.includes(code));
+  const value = String(normalized).trim();
+  if (!value) return [];
+
+  return [...new Set(
+    value
+      .split(/[\s,|;]+/)
+      .map(normalizeContentCode)
+      .filter(Boolean),
+  )];
 };
 
 const normalizePrinterContent = (rawContent) => {
-  return extractPrintableContentCodes(rawContent).join("");
+  return extractPrintableContentCodes(rawContent).join(",");
 };
 
 const useApiClient = () => {
@@ -532,8 +580,7 @@ const App = {
         oldestPendingAtLabel: null,
         orderRounds: 0,
         invoiceRounds: 0,
-        kitchenRounds: 0,
-        barRounds: 0,
+        destinationRounds: [],
         checkedAt: null,
         checkedAtLabel: null,
       },
@@ -550,6 +597,7 @@ const App = {
     const printerPort = ref("");
     const printerType = ref(PRINTER_TYPES.EPSON);
     const printerInterface = ref(PRINTER_INTERFACES.TCP);
+    const availableContentOptions = ref(BASE_CONTENT_OPTIONS);
     const content = ref([]);
     const supportsCut = ref(true);
     const supportsBeep = ref(true);
@@ -588,6 +636,13 @@ const App = {
       return url.value ? "next-printable-round" : null;
     });
 
+    const contentOptionsMap = computed(() => {
+      return availableContentOptions.value.reduce((acc, option) => {
+        acc[option.code] = option.name;
+        return acc;
+      }, {});
+    });
+
     const setPrinterActionLoading = (printerId, key, value) => {
       if (!printerId) return;
       if (!printerActionState.value[printerId]) {
@@ -619,6 +674,47 @@ const App = {
         : addBkendIfProduction(url.value, "/api/print-queue-metrics");
     };
 
+    const fetchDestinationOptions = async ({ silent = true } = {}) => {
+      if (!url.value) {
+        availableContentOptions.value = BASE_CONTENT_OPTIONS;
+        return;
+      }
+
+      const requestUrl = encodeQuery(
+        addBkendIfProduction(url.value, "/api/destinations"),
+        { active_only: 1 },
+      );
+
+      try {
+        const response = await axios.get(requestUrl);
+        const rows = response?.data?.rows || [];
+        availableContentOptions.value = buildContentOptions(rows);
+      } catch (error) {
+        availableContentOptions.value = BASE_CONTENT_OPTIONS;
+        if (!silent) {
+          toggleFlashMessage({
+            type: "warning",
+            text: "Failed to load destinations.",
+          });
+        }
+      }
+    };
+
+    const formatDestinationRounds = (destinationRounds = []) => {
+      if (!Array.isArray(destinationRounds) || !destinationRounds.length) {
+        return "No destination rounds";
+      }
+
+      return destinationRounds
+        .map((row) => {
+          const code = normalizeContentCode(row.destination);
+          const label =
+            contentOptionsMap.value[code] || formatContentLabel(code);
+          return `${label}: ${Number(row.count || 0)}`;
+        })
+        .join(" | ");
+    };
+
     const refreshRemoteQueueMetrics = async ({
       force = false,
       silent = true,
@@ -638,6 +734,7 @@ const App = {
           message: "Server URL is not configured",
           checkedAt: null,
           checkedAtLabel: null,
+          destinationRounds: [],
         };
         return;
       }
@@ -668,8 +765,9 @@ const App = {
             : null,
           orderRounds: Number(metrics.order_rounds || 0),
           invoiceRounds: Number(metrics.invoice_rounds || 0),
-          kitchenRounds: Number(metrics.kitchen_rounds || 0),
-          barRounds: Number(metrics.bar_rounds || 0),
+          destinationRounds: Array.isArray(metrics.destination_rounds)
+            ? metrics.destination_rounds
+            : [],
           checkedAt,
           checkedAtLabel: new Date(checkedAt).toLocaleString("en-US"),
         };
@@ -715,8 +813,7 @@ const App = {
             oldestPendingAtLabel: null,
             orderRounds: 0,
             invoiceRounds: 0,
-            kitchenRounds: 0,
-            barRounds: 0,
+            destinationRounds: [],
             checkedAt: null,
             checkedAtLabel: null,
           };
@@ -820,6 +917,7 @@ const App = {
           url.value = settings.base_url;
           outletCode.value = settings.outlet_code || "";
           lastRemoteMetricsFetchAt.value = 0;
+          fetchDestinationOptions({ silent: true });
           refreshDashboard(true);
           axios
             .get(
@@ -833,6 +931,7 @@ const App = {
             .then((response) => {
               appSettings.value = response?.data?.company;
               syncRemotePrintState(response?.data);
+              fetchDestinationOptions({ silent: true });
               if (activePrinters.value.length) {
                 resumeFetching();
               }
@@ -846,6 +945,7 @@ const App = {
               });
             });
         } else {
+          fetchDestinationOptions({ silent: true });
           refreshDashboard(true);
         }
       },
@@ -968,7 +1068,7 @@ const App = {
 
     const setPrinter = () => {
       isSavingPrinter.value = true;
-      const normalizedContent = normalizePrinterContent(
+      const normalizedContent = extractPrintableContentCodes(
         content.value.length ? content.value : printerForm.value.content,
       );
       const printer = {
@@ -984,7 +1084,7 @@ const App = {
         supports_beep: supportsBeep.value,
         supports_qr: supportsQr.value,
         character_set: printerCharacterSet.value || "PC852_LATIN2",
-        content: JSON.stringify(normalizedContent.split("")),
+        content: JSON.stringify(normalizedContent),
       };
       if (selectedPrinterId.value || printerForm.value.id) {
         printer.id = selectedPrinterId.value || printerForm.value.id;
@@ -1011,7 +1111,9 @@ const App = {
         printerIpAddress.value = printer.ip;
         printerPort.value = printer.port;
         printerInterface.value = printer.interface;
-        content.value = JSON.parse(printer.content);
+        content.value = extractPrintableContentCodes(
+          safeJsonParse(printer.content, []),
+        );
         supportsCut.value = Boolean(printer.supports_cut ?? 1);
         supportsBeep.value = Boolean(printer.supports_beep ?? 1);
         supportsQr.value = Boolean(printer.supports_qr ?? 1);
@@ -1025,7 +1127,9 @@ const App = {
           ipAddress: printer.ip,
           port: printer.port,
           interface: printer.interface,
-          content: JSON.parse(printer.content),
+          content: extractPrintableContentCodes(
+            safeJsonParse(printer.content, []),
+          ),
           paused: Boolean(printer.paused ?? 0),
           supportsCut: Boolean(printer.supports_cut ?? 1),
           supportsBeep: Boolean(printer.supports_beep ?? 1),
@@ -1173,16 +1277,16 @@ const App = {
     };
 
     const showPrinterContent = (content) => {
-      const abbr = normalizePrinterContent(content);
-      const len = String(abbr).length;
-
-      if (len === 1) {
-        return CONTENT_TYPES[abbr] || "Unknown";
-      } else if (len === 2) {
-        return CONTENT_TYPES[abbr] || "Unknown";
-      } else {
+      const codes = extractPrintableContentCodes(content);
+      if (!codes.length) {
         return "All Orders and Invoices";
       }
+
+      return codes
+        .map(
+          (code) => contentOptionsMap.value[code] || formatContentLabel(code),
+        )
+        .join(", ");
     };
 
     const toggleSystemInfo = () => {
@@ -1376,6 +1480,7 @@ const App = {
       printerPort,
       printerType,
       printerInterface,
+      availableContentOptions,
       content,
       supportsCut,
       supportsBeep,
@@ -1402,6 +1507,7 @@ const App = {
       setPrinter,
       showPrinterForm,
       showPrinterContent,
+      formatDestinationRounds,
       handleCancel,
       deletePrinter,
       handleLogin,

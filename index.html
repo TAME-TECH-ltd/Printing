@@ -501,9 +501,10 @@
                 </div>
                 <div class="check-text">
                   Orders: {{ dashboard.remoteMetrics.orderRounds || 0 }} |
-                  Invoices: {{ dashboard.remoteMetrics.invoiceRounds || 0 }} |
-                  Kitchen: {{ dashboard.remoteMetrics.kitchenRounds || 0 }} |
-                  Bar: {{ dashboard.remoteMetrics.barRounds || 0 }}
+                  Invoices: {{ dashboard.remoteMetrics.invoiceRounds || 0 }}
+                </div>
+                <div class="check-text">
+                  {{ formatDestinationRounds(dashboard.remoteMetrics.destinationRounds) }}
                 </div>
               </div>
             </div>
@@ -718,20 +719,14 @@
                 <div class="form-group">
                   <label for="printerContent">What to Print</label>
                   <div class="content-options">
-                    <label class="checkbox-label">
-                      <input type="checkbox" v-model="content" value="K" />
+                    <label
+                      class="checkbox-label"
+                      v-for="option in availableContentOptions"
+                      :key="option.code"
+                    >
+                      <input type="checkbox" v-model="content" :value="option.code" />
                       <span class="checkmark"></span>
-                      Kitchen
-                    </label>
-                    <label class="checkbox-label">
-                      <input type="checkbox" v-model="content" value="B" />
-                      <span class="checkmark"></span>
-                      Bar
-                    </label>
-                    <label class="checkbox-label">
-                      <input type="checkbox" v-model="content" value="I" />
-                      <span class="checkmark"></span>
-                      Invoices
+                      {{ option.name }}
                     </label>
                   </div>
                 </div>
