@@ -78,6 +78,37 @@ const CONTENT_TYPES = {
   IB: "BAR & Invoices",
 };
 
+const CONTENT_PRIORITY = ["K", "B", "I"];
+
+const extractPrintableContentCodes = (rawContent) => {
+  if (!rawContent) return [];
+
+  if (Array.isArray(rawContent)) {
+    const normalizedItems = rawContent.map((item) => String(item).toUpperCase());
+    return CONTENT_PRIORITY.filter((code) => normalizedItems.includes(code));
+  }
+
+  let normalized = rawContent;
+  if (typeof rawContent === "string") {
+    try {
+      const parsed = JSON.parse(rawContent);
+      if (Array.isArray(parsed)) {
+        return extractPrintableContentCodes(parsed);
+      }
+      normalized = parsed;
+    } catch {
+      normalized = rawContent;
+    }
+  }
+
+  const value = String(normalized).toUpperCase();
+  return CONTENT_PRIORITY.filter((code) => value.includes(code));
+};
+
+const normalizePrinterContent = (rawContent) => {
+  return extractPrintableContentCodes(rawContent).join("");
+};
+
 const useApiClient = () => {
   const isLoading = ref(false);
   const isFetching = ref(false);
@@ -124,20 +155,6 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
   const MAX_RETRY_DELAY = 20000;
   const isFetching = ref(false);
   const workerStates = ref({});
-
-  const normalizePrinterContent = (rawContent) => {
-    if (!rawContent) return "";
-    if (Array.isArray(rawContent)) return rawContent.join("");
-    if (typeof rawContent === "string") {
-      try {
-        const parsed = JSON.parse(rawContent);
-        return Array.isArray(parsed) ? parsed.join("") : String(parsed || "");
-      } catch {
-        return rawContent;
-      }
-    }
-    return String(rawContent);
-  };
 
   const getPrinterWorkerKey = (printer) => {
     if (!printer) return "";
@@ -951,6 +968,9 @@ const App = {
 
     const setPrinter = () => {
       isSavingPrinter.value = true;
+      const normalizedContent = normalizePrinterContent(
+        content.value.length ? content.value : printerForm.value.content,
+      );
       const printer = {
         url: url.value,
         outlet_code: outletCode.value || null, // pass to backend
@@ -964,9 +984,7 @@ const App = {
         supports_beep: supportsBeep.value,
         supports_qr: supportsQr.value,
         character_set: printerCharacterSet.value || "PC852_LATIN2",
-        content: JSON.stringify(
-          content.value.length ? content.value : printerForm.value.content,
-        ),
+        content: JSON.stringify(normalizedContent.split("")),
       };
       if (selectedPrinterId.value || printerForm.value.id) {
         printer.id = selectedPrinterId.value || printerForm.value.id;
@@ -1155,7 +1173,7 @@ const App = {
     };
 
     const showPrinterContent = (content) => {
-      const abbr = JSON.parse(content).join("");
+      const abbr = normalizePrinterContent(content);
       const len = String(abbr).length;
 
       if (len === 1) {
