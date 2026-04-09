@@ -1,14 +1,7 @@
 const electron = require("electron");
 const path = require("path");
-const {
-  app,
-  BrowserWindow,
-  ipcMain,
-  Menu,
-  Tray,
-  nativeImage,
-  Notification,
-} = electron;
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, Notification } =
+  electron;
 const {
   ThermalPrinter,
   PrinterTypes,
@@ -135,11 +128,7 @@ function initializeDatabase() {
       "supports_beep",
       "INTEGER NOT NULL DEFAULT 1",
     );
-    ensureColumnExists(
-      "printers",
-      "supports_qr",
-      "INTEGER NOT NULL DEFAULT 1",
-    );
+    ensureColumnExists("printers", "supports_qr", "INTEGER NOT NULL DEFAULT 1");
     ensureColumnExists(
       "printers",
       "character_set",
@@ -233,7 +222,9 @@ function getPrinterIdFromKey(printerKey) {
 
 function getPrinterRecordById(printerId) {
   if (!printerId) return null;
-  return db.prepare("SELECT * FROM printers WHERE id = ?").get(printerId) || null;
+  return (
+    db.prepare("SELECT * FROM printers WHERE id = ?").get(printerId) || null
+  );
 }
 
 function getPrinterRecordByKey(printerKey) {
@@ -422,7 +413,9 @@ function syncRemotePrintState(data = {}) {
 
   if (
     !shouldPurgeOnInitialSync &&
-    (!previousDayToken || !incomingDayToken || previousDayToken === incomingDayToken)
+    (!previousDayToken ||
+      !incomingDayToken ||
+      previousDayToken === incomingDayToken)
   ) {
     return { success: true, changed: false, purgedJobs: 0, purgedRounds: 0 };
   }
@@ -443,13 +436,15 @@ function recoverInterruptedPrintJobs() {
   if (!db) return;
 
   const now = nowIsoString();
-  const result = db.prepare(
-    `
+  const result = db
+    .prepare(
+      `
       UPDATE print_jobs
       SET status = ?, locked_at = NULL, next_retry_at = COALESCE(next_retry_at, ?), updated_at = ?
       WHERE status = ?
     `,
-  ).run(PRINT_JOB_STATUS.PENDING, now, now, PRINT_JOB_STATUS.PROCESSING);
+    )
+    .run(PRINT_JOB_STATUS.PENDING, now, now, PRINT_JOB_STATUS.PROCESSING);
 
   recoveredInterruptedJobsCount = Number(result?.changes || 0);
 }
@@ -609,7 +604,10 @@ function getQueuedJobs(limit = 30) {
 }
 
 async function buildStartupChecks() {
-  if (Date.now() - cachedStartupChecksAt < 30000 && cachedStartupChecks.length) {
+  if (
+    Date.now() - cachedStartupChecksAt < 30000 &&
+    cachedStartupChecks.length
+  ) {
     return cachedStartupChecks;
   }
 
@@ -1146,10 +1144,7 @@ function markPrintJobForRetry(job, error) {
       printerName,
     });
 
-    maybeNotify(
-      "Printing Service",
-      `${printerName}: ${message}`,
-    );
+    maybeNotify("Printing Service", `${printerName}: ${message}`);
   }
 
   return retryDelayMs;
@@ -1352,7 +1347,7 @@ async function performPrintJob(data) {
       align: "LEFT",
     },
     {
-      text: `Time: ${helper.formatTime(data?.order?.order_time)}`,
+      text: `Time: ${data?.order?.order_time}`,
       align: "RIGHT",
     },
   ]);
@@ -1677,15 +1672,9 @@ const helper = {
   formatDate(str) {
     try {
       if (!str) return "N/A";
-      let options = {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-        timeZone: this.timeZone,
-      };
       let today = new Date(str);
       if (isNaN(today.getTime())) return "Invalid Date";
-      return today.toLocaleDateString("en-US", options);
+      return today.toLocaleDateString("en-GB");
     } catch (error) {
       console.error("Date formatting error:", error);
       return "Invalid Date";
@@ -2195,7 +2184,9 @@ ipcMain.handle("clear-print-job", async (event, jobId) => {
       throw new Error("Print job not found");
     }
     if (job.status === PRINT_JOB_STATUS.PROCESSING) {
-      throw new Error("Wait for the current print attempt to finish before clearing this job");
+      throw new Error(
+        "Wait for the current print attempt to finish before clearing this job",
+      );
     }
 
     db.prepare("DELETE FROM print_jobs WHERE id = ?").run(id);

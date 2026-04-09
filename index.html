@@ -71,6 +71,7 @@
                 class="add-btn btn-sm logout-btn"
                 v-show="displayMode === 'PRINTERS_VIEW'"
                 @click="showPrinterForm()"
+                style="color: #fff"
               >
                 <svg class="add-icon" viewBox="0 0 24 24" fill="none">
                   <path
@@ -316,17 +317,17 @@
                     >{{ printer.port }}</span
                   >
                 </div>
-                <div class="printer-content">
-                  <span class="content-label">Prints:</span>
-                  <span class="content-value"
-                    >{{ showPrinterContent(printer.content) }}</span
-                  >
-                </div>
                 <div class="printer-health-line">
-                  <span class="printer-health-badge" :class="{ paused: printer.paused }">
+                  <span
+                    class="printer-health-badge"
+                    :class="{ paused: printer.paused }"
+                  >
                     {{ printer.paused ? "Paused" : "Active" }}
                   </span>
-                  <span v-if="printer.queue?.pending" class="printer-health-text">
+                  <span
+                    v-if="printer.queue?.pending"
+                    class="printer-health-text"
+                  >
                     Pending: {{ printer.queue.pending }}
                   </span>
                   <span
@@ -446,15 +447,21 @@
           <div class="section-content" v-show="showServiceHealth">
             <div class="health-summary-grid">
               <div class="health-card">
-                <div class="health-value">{{ dashboard.summary.pendingJobs || 0 }}</div>
+                <div class="health-value">
+                  {{ dashboard.summary.pendingJobs || 0 }}
+                </div>
                 <div class="health-label">Pending Jobs</div>
               </div>
               <div class="health-card">
-                <div class="health-value">{{ dashboard.summary.processingJobs || 0 }}</div>
+                <div class="health-value">
+                  {{ dashboard.summary.processingJobs || 0 }}
+                </div>
                 <div class="health-label">Processing</div>
               </div>
               <div class="health-card">
-                <div class="health-value">{{ dashboard.summary.retryJobs || 0 }}</div>
+                <div class="health-value">
+                  {{ dashboard.summary.retryJobs || 0 }}
+                </div>
                 <div class="health-label">Retry Queue</div>
               </div>
               <div class="health-card">
@@ -472,7 +479,8 @@
                 </div>
                 <div class="health-label">API Pending</div>
                 <div class="health-note">
-                  {{ dashboard.remoteMetrics.checkedAtLabel || "Waiting for API" }}
+                  {{ dashboard.remoteMetrics.checkedAtLabel || "Waiting for API"
+                  }}
                 </div>
               </div>
             </div>
@@ -495,16 +503,24 @@
                 :class="getCheckClass(dashboard.remoteMetrics.status)"
               >
                 <div class="check-title">API Queue</div>
-                <div class="check-text">{{ dashboard.remoteMetrics.message }}</div>
-                <div class="check-text" v-if="dashboard.remoteMetrics.oldestPendingAtLabel">
-                  Oldest pending: {{ dashboard.remoteMetrics.oldestPendingAtLabel }}
+                <div class="check-text">
+                  {{ dashboard.remoteMetrics.message }}
+                </div>
+                <div
+                  class="check-text"
+                  v-if="dashboard.remoteMetrics.oldestPendingAtLabel"
+                >
+                  Oldest pending: {{
+                  dashboard.remoteMetrics.oldestPendingAtLabel }}
                 </div>
                 <div class="check-text">
                   Orders: {{ dashboard.remoteMetrics.orderRounds || 0 }} |
                   Invoices: {{ dashboard.remoteMetrics.invoiceRounds || 0 }}
                 </div>
                 <div class="check-text">
-                  {{ formatDestinationRounds(dashboard.remoteMetrics.destinationRounds) }}
+                  {{
+                  formatDestinationRounds(dashboard.remoteMetrics.destinationRounds)
+                  }}
                 </div>
               </div>
             </div>
@@ -541,7 +557,11 @@
             </div>
 
             <div v-else class="queue-list">
-              <div v-for="job in dashboard.queuedJobs" :key="job.id" class="queue-item">
+              <div
+                v-for="job in dashboard.queuedJobs"
+                :key="job.id"
+                class="queue-item"
+              >
                 <div class="queue-main">
                   <div class="queue-title">
                     Job #{{ job.id }} - {{ job.printer_name }}
@@ -724,7 +744,11 @@
                       v-for="option in availableContentOptions"
                       :key="option.code"
                     >
-                      <input type="checkbox" v-model="content" :value="option.code" />
+                      <input
+                        type="checkbox"
+                        v-model="content"
+                        :value="option.code"
+                      />
                       <span class="checkmark"></span>
                       {{ option.name }}
                     </label>
@@ -796,7 +820,6 @@
             </form>
           </div>
         </div>
-
       </div>
     </div>
 
