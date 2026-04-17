@@ -1566,10 +1566,7 @@ async function performPrintJob(data) {
 
   printer.alignCenter();
   printer.setTypeFontA();
-  if (
-    shouldPrintLogo &&
-    (roundCategory === "ORDER" || roundCategory === "INVOICE")
-  ) {
+  if (shouldPrintLogo && roundCategory === "INVOICE") {
     try {
       await withTimeout(
         printOptionalCompanyLogo(printer, data),
@@ -1679,7 +1676,7 @@ async function performPrintJob(data) {
       printer.bold(true);
       tableCustom([
         {
-          text: `Notes: ${toPrintableString(item?.comment)}`,
+          text: `${toPrintableString(item?.comment)}`,
           align: "LEFT",
           width: 1,
         },
