@@ -41,6 +41,8 @@ const PNG_DATA_URL_PREFIX = "data:image/png;base64,";
 const PNG_SIGNATURE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
+const LOGO_MAX_WIDTH_PX = 420;
+const LOGO_MAX_HEIGHT_PX = 190;
 
 function initializeDatabase() {
   try {
@@ -134,6 +136,7 @@ function initializeDatabase() {
       "INTEGER NOT NULL DEFAULT 1",
     );
     ensureColumnExists("printers", "supports_qr", "INTEGER NOT NULL DEFAULT 1");
+    ensureColumnExists("printers", "print_logo", "INTEGER NOT NULL DEFAULT 1");
     ensureColumnExists(
       "printers",
       "character_set",
@@ -560,6 +563,7 @@ function mapPrinterForUi(printer) {
     supports_cut: Boolean(printer?.supports_cut),
     supports_beep: Boolean(printer?.supports_beep),
     supports_qr: Boolean(printer?.supports_qr),
+    print_logo: Boolean(printer?.print_logo ?? 1),
     character_set: printer?.character_set || DEFAULT_PRINTER_CHARACTER_SET,
   };
 }
@@ -674,6 +678,7 @@ async function buildStartupChecks() {
           supportsCut: Boolean(printer.supports_cut),
           supportsBeep: Boolean(printer.supports_beep),
           supportsQr: Boolean(printer.supports_qr),
+          printLogo: Boolean(printer.print_logo ?? 1),
           characterSet: printer.character_set,
         });
         const transport = resolvePrinterTransport(payload);
@@ -1131,8 +1136,32 @@ async function printOptionalCompanyLogo(printer, data = {}) {
     return false;
   }
 
+  let preparedBuffer = logoBuffer;
+  try {
+    const logoImage = nativeImage.createFromBuffer(logoBuffer);
+    if (!logoImage.isEmpty()) {
+      const { width, height } = logoImage.getSize();
+      const scale = Math.min(
+        LOGO_MAX_WIDTH_PX / Math.max(width, 1),
+        LOGO_MAX_HEIGHT_PX / Math.max(height, 1),
+        1,
+      );
+
+      if (scale < 1) {
+        preparedBuffer = logoImage
+          .resize({
+            width: Math.max(1, Math.round(width * scale)),
+            height: Math.max(1, Math.round(height * scale)),
+          })
+          .toPNG();
+      }
+    }
+  } catch (error) {
+    console.warn("Failed to resize company logo:", error?.message || error);
+  }
+
   printer.alignCenter();
-  await printer.printImageBuffer(logoBuffer);
+  await printer.printImageBuffer(preparedBuffer);
   printer.newLine();
   return true;
 }
@@ -1500,6 +1529,7 @@ async function performPrintJob(data) {
   const supportsCut = data?.supportsCut !== false;
   const supportsBeep = data?.supportsBeep !== false;
   const supportsQr = data?.supportsQr !== false;
+  const shouldPrintLogo = data?.printLogo !== false;
   const roundCategory = toPrintableString(data?.round?.category).toUpperCase();
   const order = data?.order || {};
   const settings = data?.settings || {};
@@ -1536,7 +1566,10 @@ async function performPrintJob(data) {
 
   printer.alignCenter();
   printer.setTypeFontA();
-  if (roundCategory === "ORDER" || roundCategory === "INVOICE") {
+  if (
+    shouldPrintLogo &&
+    (roundCategory === "ORDER" || roundCategory === "INVOICE")
+  ) {
     try {
       await withTimeout(
         printOptionalCompanyLogo(printer, data),
@@ -1637,7 +1670,12 @@ async function performPrintJob(data) {
       },
     ]);
     if (toPrintableString(item?.comment).trim()) {
-      printer.setTypeFontB();
+      if (roundCategory === "ORDER") {
+        printer.setTextNormal();
+        printer.setTypeFontA();
+      } else {
+        printer.setTypeFontB();
+      }
       printer.bold(true);
       tableCustom([
         {
@@ -1647,6 +1685,7 @@ async function performPrintJob(data) {
         },
       ]);
       printer.bold(false);
+      printer.setTextNormal();
       printer.setTypeFontA();
     }
   });
@@ -2504,6 +2543,7 @@ ipcMain.handle("run-test-print", async (event, printerId) => {
       supportsCut: Boolean(printer.supports_cut),
       supportsBeep: Boolean(printer.supports_beep),
       supportsQr: Boolean(printer.supports_qr),
+      printLogo: Boolean(printer.print_logo ?? 1),
       characterSet: printer.character_set,
     });
 
@@ -2545,7 +2585,7 @@ ipcMain.handle("add-printer", async (event, printer) => {
     if (id) {
       const stmt = db.prepare(`
         UPDATE printers 
-        SET name = ?, type = ?, ip = ?, port = ?, interface = ?, content = ?, paused = ?, supports_cut = ?, supports_beep = ?, supports_qr = ?, character_set = ?
+        SET name = ?, type = ?, ip = ?, port = ?, interface = ?, content = ?, paused = ?, supports_cut = ?, supports_beep = ?, supports_qr = ?, print_logo = ?, character_set = ?
         WHERE id = ?
       `);
       stmt.run(
@@ -2559,14 +2599,15 @@ ipcMain.handle("add-printer", async (event, printer) => {
         boolToInt(printer.supports_cut, 1),
         boolToInt(printer.supports_beep, 1),
         boolToInt(printer.supports_qr, 1),
+        boolToInt(printer.print_logo, 1),
         printer.character_set || DEFAULT_PRINTER_CHARACTER_SET,
         id,
       );
       result = db.prepare("SELECT * FROM printers WHERE id = ?").get(id);
     } else {
       const stmt = db.prepare(`
-        INSERT INTO printers (name, type, ip, port, interface, content, paused, supports_cut, supports_beep, supports_qr, character_set)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO printers (name, type, ip, port, interface, content, paused, supports_cut, supports_beep, supports_qr, print_logo, character_set)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const info = stmt.run(
         printer.name,
@@ -2579,6 +2620,7 @@ ipcMain.handle("add-printer", async (event, printer) => {
         boolToInt(printer.supports_cut, 1),
         boolToInt(printer.supports_beep, 1),
         boolToInt(printer.supports_qr, 1),
+        boolToInt(printer.print_logo, 1),
         printer.character_set || DEFAULT_PRINTER_CHARACTER_SET,
       );
       result = db

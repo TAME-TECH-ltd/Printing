@@ -406,6 +406,7 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
         items,
         order,
         settings: { ...appSettings.value },
+        printLogo: Boolean(printer.print_logo ?? 1),
         content: normalizePrinterContent(printer.content),
       };
 
@@ -602,6 +603,7 @@ const App = {
     const supportsCut = ref(true);
     const supportsBeep = ref(true);
     const supportsQr = ref(true);
+    const printLogo = ref(true);
     const printerCharacterSet = ref("PC852_LATIN2");
 
     const printerForm = ref({
@@ -616,6 +618,7 @@ const App = {
       supportsCut: true,
       supportsBeep: true,
       supportsQr: true,
+      printLogo: true,
       characterSet: "PC852_LATIN2",
     });
 
@@ -1048,6 +1051,7 @@ const App = {
       supportsCut.value = true;
       supportsBeep.value = true;
       supportsQr.value = true;
+      printLogo.value = true;
       printerCharacterSet.value = "PC852_LATIN2";
 
       printerForm.value = {
@@ -1062,6 +1066,7 @@ const App = {
         supportsCut: true,
         supportsBeep: true,
         supportsQr: true,
+        printLogo: true,
         characterSet: "PC852_LATIN2",
       };
     };
@@ -1083,6 +1088,7 @@ const App = {
         supports_cut: supportsCut.value,
         supports_beep: supportsBeep.value,
         supports_qr: supportsQr.value,
+        print_logo: printLogo.value,
         character_set: printerCharacterSet.value || "PC852_LATIN2",
         content: JSON.stringify(normalizedContent),
       };
@@ -1117,6 +1123,7 @@ const App = {
         supportsCut.value = Boolean(printer.supports_cut ?? 1);
         supportsBeep.value = Boolean(printer.supports_beep ?? 1);
         supportsQr.value = Boolean(printer.supports_qr ?? 1);
+        printLogo.value = Boolean(printer.print_logo ?? 1);
         printerCharacterSet.value =
           printer.character_set || "PC852_LATIN2";
 
@@ -1134,6 +1141,7 @@ const App = {
           supportsCut: Boolean(printer.supports_cut ?? 1),
           supportsBeep: Boolean(printer.supports_beep ?? 1),
           supportsQr: Boolean(printer.supports_qr ?? 1),
+          printLogo: Boolean(printer.print_logo ?? 1),
           characterSet: printer.character_set || "PC852_LATIN2",
         };
       } else {
@@ -1485,6 +1493,7 @@ const App = {
       supportsCut,
       supportsBeep,
       supportsQr,
+      printLogo,
       printerCharacterSet,
 
       printerForm,
