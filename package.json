@@ -105,7 +105,7 @@
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^12.4.1",
-    "node-thermal-printer": "^4.5.0"
+    "node-thermal-printer": "^4.6.0"
   },
   "devDependencies": {
     "cross-env": "^10.0.0",

@@ -1,4 +1,5 @@
 const electron = require("electron");
+const fs = require("fs");
 const path = require("path");
 const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, Notification } =
   electron;
@@ -36,6 +37,10 @@ const PRINT_QUEUE_MAX_DELAY_MS = 60000;
 const PRINT_EXECUTION_TIMEOUT_MS = 20000;
 const DASHBOARD_NOTIFICATION_THROTTLE_MS = 60000;
 const DEFAULT_PRINTER_CHARACTER_SET = "PC852_LATIN2";
+const PNG_DATA_URL_PREFIX = "data:image/png;base64,";
+const PNG_SIGNATURE = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
 
 function initializeDatabase() {
   try {
@@ -905,6 +910,233 @@ function resolveCharacterSet(name) {
   return CharacterSet[name] || CharacterSet[DEFAULT_PRINTER_CHARACTER_SET];
 }
 
+function toPrintableString(value, fallback = "") {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "bigint"
+  ) {
+    return String(value);
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function sanitizeTableRows(rows = []) {
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+
+  return rows.map((row) => ({
+    ...row,
+    text: toPrintableString(row?.text, ""),
+  }));
+}
+
+function getNestedValue(source, keyPath = []) {
+  return keyPath.reduce(
+    (current, key) =>
+      current && typeof current === "object" ? current[key] : undefined,
+    source,
+  );
+}
+
+function getOptionalLogoSource(data = {}) {
+  const candidatePaths = [["settings", "site_logo"]];
+
+  for (const candidatePath of candidatePaths) {
+    const value = getNestedValue(data, candidatePath);
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return null;
+}
+
+function addBackendPathIfNeeded(baseUrl, assetPath) {
+  try {
+    const parsed = new URL(baseUrl);
+    if (
+      parsed.hostname === "localhost" ||
+      parsed.hostname === "127.0.0.1" ||
+      parsed.hostname.endsWith(".localhost")
+    ) {
+      return `${baseUrl}${assetPath}`;
+    }
+  } catch {
+    if (baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1")) {
+      return `${baseUrl}${assetPath}`;
+    }
+  }
+
+  const cleanPath = assetPath.startsWith("/") ? assetPath : `/${assetPath}`;
+  const insertPath = cleanPath.startsWith("/bkend/")
+    ? cleanPath
+    : `/bkend${cleanPath}`;
+  return `${baseUrl}${insertPath}`;
+}
+
+function isHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isPngBuffer(buffer) {
+  return (
+    Buffer.isBuffer(buffer) &&
+    buffer.length >= PNG_SIGNATURE.length &&
+    buffer.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
+  );
+}
+
+function tryDecodeInlinePngBuffer(source) {
+  if (typeof source !== "string") {
+    return null;
+  }
+
+  const trimmed = source.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.toLowerCase().startsWith(PNG_DATA_URL_PREFIX)) {
+    return Buffer.from(trimmed.slice(PNG_DATA_URL_PREFIX.length), "base64");
+  }
+
+  if (trimmed.startsWith("iVBORw0KGgo")) {
+    return Buffer.from(trimmed, "base64");
+  }
+
+  return null;
+}
+
+function resolveLocalLogoPath(source) {
+  if (typeof source !== "string" || !source.trim()) {
+    return null;
+  }
+
+  const trimmed = source.trim();
+  const localCandidate = path.isAbsolute(trimmed)
+    ? trimmed
+    : path.resolve(__dirname, trimmed);
+
+  return fs.existsSync(localCandidate) ? localCandidate : null;
+}
+
+function resolveRemoteLogoUrl(source) {
+  if (typeof source !== "string" || !source.trim()) {
+    return null;
+  }
+
+  const trimmed = source.trim();
+  if (isHttpUrl(trimmed)) {
+    return trimmed;
+  }
+
+  const baseUrl = getSettingsRecord()?.base_url;
+  if (!baseUrl) {
+    return null;
+  }
+
+  const normalizedPath = trimmed.replace(/^[/\\]+/, "");
+
+  if (
+    normalizedPath &&
+    !normalizedPath.startsWith("uploads/") &&
+    !normalizedPath.includes("://")
+  ) {
+    return addBackendPathIfNeeded(baseUrl, `/uploads/${normalizedPath}`);
+  }
+
+  try {
+    if (normalizedPath.startsWith("uploads/")) {
+      return addBackendPathIfNeeded(baseUrl, `/${normalizedPath}`);
+    }
+
+    return new URL(trimmed, baseUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
+async function loadLogoPngBuffer(data = {}) {
+  const source = getOptionalLogoSource(data);
+  if (!source) {
+    return null;
+  }
+
+  const inlineBuffer = tryDecodeInlinePngBuffer(source);
+  if (inlineBuffer) {
+    if (!isPngBuffer(inlineBuffer)) {
+      throw new Error("Inline logo is not a valid PNG image");
+    }
+    return inlineBuffer;
+  }
+
+  const localPath = resolveLocalLogoPath(source);
+  if (localPath) {
+    const fileBuffer = fs.readFileSync(localPath);
+    if (!isPngBuffer(fileBuffer)) {
+      throw new Error("Local logo must be a PNG image");
+    }
+    return fileBuffer;
+  }
+
+  const remoteUrl = resolveRemoteLogoUrl(source);
+  if (!remoteUrl) {
+    throw new Error("Logo source could not be resolved");
+  }
+
+  if (typeof globalThis.fetch !== "function") {
+    throw new Error("Remote logo loading is not available in this runtime");
+  }
+
+  const response = await globalThis.fetch(remoteUrl);
+  if (!response.ok) {
+    throw new Error(`Logo download failed with status ${response.status}`);
+  }
+
+  const remoteBuffer = Buffer.from(await response.arrayBuffer());
+  if (!isPngBuffer(remoteBuffer)) {
+    throw new Error("Remote logo must be a PNG image");
+  }
+
+  return remoteBuffer;
+}
+
+async function printOptionalCompanyLogo(printer, data = {}) {
+  const logoBuffer = await loadLogoPngBuffer(data);
+  if (!logoBuffer) {
+    return false;
+  }
+
+  printer.alignCenter();
+  await printer.printImageBuffer(logoBuffer);
+  printer.newLine();
+  return true;
+}
+
 function buildTestPrintPayload(data = {}) {
   return {
     ...data,
@@ -1268,6 +1500,10 @@ async function performPrintJob(data) {
   const supportsCut = data?.supportsCut !== false;
   const supportsBeep = data?.supportsBeep !== false;
   const supportsQr = data?.supportsQr !== false;
+  const roundCategory = toPrintableString(data?.round?.category).toUpperCase();
+  const order = data?.order || {};
+  const settings = data?.settings || {};
+  const items = Array.isArray(data?.items) ? data.items : [];
   const options = {
     type: PrinterTypes[data.type],
     characterSet: resolveCharacterSet(data?.characterSet),
@@ -1292,69 +1528,91 @@ async function performPrintJob(data) {
     }
   }
 
+  const print = (text, fallback = "") =>
+    printer.print(toPrintableString(text, fallback));
+  const println = (text, fallback = "") =>
+    printer.println(toPrintableString(text, fallback));
+  const tableCustom = (rows) => printer.tableCustom(sanitizeTableRows(rows));
+
   printer.alignCenter();
   printer.setTypeFontA();
+  if (roundCategory === "ORDER" || roundCategory === "INVOICE") {
+    try {
+      await withTimeout(
+        printOptionalCompanyLogo(printer, data),
+        5000,
+        "Company logo loading",
+      );
+    } catch (error) {
+      console.warn("Skipping company logo:", error?.message || error);
+      printer.alignCenter();
+    }
+  }
   printer.setTextDoubleHeight();
   printer.setTextDoubleWidth();
-  printer.println(data?.settings?.site_name);
+  println(settings?.site_name);
   printer.setTextNormal();
-  printer.println(`TIN: ${data?.settings?.app_tin}`);
-  printer.println(`Tel: ${data?.settings?.app_phone}`);
-  printer.println(`Email: ${data?.settings?.app_email}`);
-  printer.println(`Address: ${data?.settings?.site_address}`);
+  println(`TIN: ${toPrintableString(settings?.app_tin)}`);
+  println(`Tel: ${toPrintableString(settings?.app_phone)}`);
+  println(`Email: ${toPrintableString(settings?.app_email)}`);
+  println(`Address: ${toPrintableString(settings?.site_address)}`);
   printer.drawLine();
   printer.alignLeft();
 
-  const isReceipt = data?.order?.ebm_meta || data?.round?.origin === "RETAIL";
-  if (data?.testMode || data?.round?.category === "TEST") {
-    printer.println("TEST PRINT");
-    printer.println(`Printer: ${data?.printer || "Unknown"}`);
-    printer.println(`Interface: ${transport.uri}`);
-    printer.println(`Printed At: ${new Date().toLocaleString("en-US")}`);
-  } else if (data?.round?.category === "ORDER") {
-    printer.println(
-      `Order #: ${helper.generateVoucherNo(data?.round?.round_no)}(${
-        data?.round?.destination
-      })`,
+  const isReceipt =
+    Boolean(order?.ebm_meta) || data?.round?.origin === "RETAIL";
+  if (data?.testMode || roundCategory === "TEST") {
+    println("TEST PRINT");
+    println(`Printer: ${toPrintableString(data?.printer, "Unknown")}`);
+    println(`Interface: ${transport.uri}`);
+    println(`Printed At: ${new Date().toLocaleString("en-US")}`);
+  } else if (roundCategory === "ORDER") {
+    println(
+      `Order #: ${helper.generateVoucherNo(data?.round?.round_no)}(${toPrintableString(
+        data?.round?.destination,
+      )})`,
     );
-  } else if (data?.round?.category === "INVOICE") {
-    printer.println(
+  } else if (roundCategory === "INVOICE") {
+    println(
       `${isReceipt ? "RECEIPT" : "INVOICE"} #: ${helper.generateVoucherNo(
-        data?.order?.id,
+        order?.id,
       )}`,
     );
   } else {
-    printer.println(
+    println(
       `\x1B\x45\x01Round Slip #\x1B\x45\x00: ${helper.generateVoucherNo(
         data?.round?.round_no,
       )}`,
     );
   }
-  printer.println(`Customer: ${data?.order?.client || "Walk-In"}`);
+  println(`Customer: ${toPrintableString(order?.client, "Walk-In")}`);
   if (!isReceipt) {
-    printer.tableCustom([
+    tableCustom([
       {
-        text: `Served By: ${data?.order?.waiter}`,
+        text: `Served By: ${toPrintableString(order?.waiter)}`,
         align: "LEFT",
       },
-      { text: `Table No: ${data?.order?.table_name}`, align: "RIGHT" },
+      {
+        text: `Table No: ${toPrintableString(order?.table_name)}`,
+        align: "RIGHT",
+      },
     ]);
   }
 
-  printer.tableCustom([
+  tableCustom([
     {
-      text: `Date: ${helper.formatDate(data?.order?.system_date)}`,
+      text: `Date: ${helper.formatDate(order?.system_date)}`,
       align: "LEFT",
     },
     {
-      text: `Time: ${data?.order?.order_time}`,
+      text: `Time: ${toPrintableString(order?.order_time)}`,
       align: "RIGHT",
     },
   ]);
 
   printer.drawLine();
 
-  printer.tableCustom([
+  tableCustom([
     { text: "Item", align: "LEFT", width: 0.5, bold: true },
     { text: "Qty", align: "CENTER", width: 0.1, bold: true },
     { text: "Price", align: "CENTER", width: 0.18, bold: true },
@@ -1363,63 +1621,71 @@ async function performPrintJob(data) {
 
   printer.drawLine();
 
-  data?.items.forEach((item) => {
-    printer.tableCustom([
-      { text: item.name, align: "LEFT", width: 0.5 },
-      { text: item.quantity, align: "CENTER", width: 0.1 },
-      { text: helper.formatMoney(item.price), align: "CENTER", width: 0.18 },
-      { text: helper.formatMoney(item.amount), align: "RIGHT", width: 0.22 },
+  items.forEach((item = {}) => {
+    tableCustom([
+      { text: item?.name, align: "LEFT", width: 0.5 },
+      { text: item?.quantity, align: "CENTER", width: 0.1 },
+      {
+        text: helper.formatMoney(item?.price),
+        align: "CENTER",
+        width: 0.18,
+      },
+      {
+        text: helper.formatMoney(item?.amount),
+        align: "RIGHT",
+        width: 0.22,
+      },
     ]);
-    if (item?.comment && data?.round?.category === "ORDER") {
+    if (toPrintableString(item?.comment).trim()) {
       printer.setTypeFontB();
-      printer.tableCustom([
+      printer.bold(true);
+      tableCustom([
         {
-          text: `\x1B\x45\x01Notes: \x1B\x45\x00${item.comment}`,
+          text: `Notes: ${toPrintableString(item?.comment)}`,
           align: "LEFT",
           width: 1,
         },
       ]);
+      printer.bold(false);
       printer.setTypeFontA();
     }
   });
 
   printer.drawLine();
 
-  if (data?.round?.category === "INVOICE") {
-    if (data?.order?.ebm_meta) {
+  if (roundCategory === "INVOICE") {
+    if (order?.ebm_meta) {
       const totals = [
-        ["Total Rwf", `${data?.order?.grand_total}`],
+        ["Total Rwf", `${order?.grand_total}`],
         ["Total A-EX Rwf", `0.00`],
-        ["Total B-18% Rwf", `${data?.order?.total_taxes}`],
+        ["Total B-18% Rwf", `${order?.total_taxes}`],
         ["Total D", `0.00`],
-        ["Total Tax Rwf", `${data?.order?.total_taxes}`],
+        ["Total Tax Rwf", `${order?.total_taxes}`],
       ];
 
       totals.forEach((item) => {
-        printer.tableCustom([
+        tableCustom([
           { text: item[0], align: "LEFT" },
           { text: item[1], align: "RIGHT" },
         ]);
       });
 
       printer.drawLine();
-      const invoiceMeta = data?.order?.ebm_meta;
+      const invoiceMeta = order?.ebm_meta;
       printer.newLine();
       printer.bold(true);
-      printer.print("SDC INFORMATION");
+      print("SDC INFORMATION");
       printer.bold(false);
       printer.newLine();
       printer.setTextNormal();
       printer.drawLine();
-      printer.println(
-        `Date: ${helper.formateEbmDate(invoiceMeta.vsdcRcptPbctDate)}`,
-      );
-      printer.println(`SDC ID: ${invoiceMeta.sdcId}`);
-      printer.println(`Internal Data: ${invoiceMeta.intrlData}`);
-      printer.println(`Receipt Signature: ${invoiceMeta.rcptSign}`);
-      printer.println(`MRC: ${invoiceMeta.mrcNo}`);
+      println(`Date: ${helper.formateEbmDate(invoiceMeta.vsdcRcptPbctDate)}`);
+      println(`SDC ID: ${toPrintableString(invoiceMeta.sdcId)}`);
+      println(`Internal Data: ${toPrintableString(invoiceMeta.intrlData)}`);
+      println(`Receipt Signature: ${toPrintableString(invoiceMeta.rcptSign)}`);
+      println(`MRC: ${toPrintableString(invoiceMeta.mrcNo)}`);
       printer.newLine();
-      if (supportsQr) {
+      if (supportsQr && toPrintableString(invoiceMeta.rcptSign).trim()) {
         printer.alignCenter();
         printer.printQR(
           `https://myrra.rra.gov.rw/common/link/ebm/receipt/indexEbmReceiptData?Data=${invoiceMeta.rcptSign}`,
@@ -1429,40 +1695,38 @@ async function performPrintJob(data) {
           },
         );
       } else {
-        printer.println(`QR: ${invoiceMeta.rcptSign}`);
+        println(`QR: ${toPrintableString(invoiceMeta.rcptSign)}`);
       }
-      printer.println(`Powered by EBM v2.1`);
+      println(`Powered by EBM v2.1`);
     } else {
       printer.alignRight();
       printer.setTextDoubleWidth();
-      printer.println(`Total: ${helper.formatMoney(data?.order?.grand_total)}`);
+      println(`Total: ${helper.formatMoney(order?.grand_total)}`);
       printer.setTextNormal();
       printer.drawLine();
       printer.alignCenter();
-      printer.print(`Dial `);
+      print(`Dial `);
       printer.bold(true);
       printer.setTextQuadArea();
       printer.setTypeFontB();
-      printer.print(`${data?.settings?.momo_code}`);
+      print(settings?.momo_code);
       printer.bold(false);
       printer.setTextNormal();
       printer.setTypeFontA();
-      printer.print(` to pay with MOMO`);
+      print(` to pay with MOMO`);
       printer.newLine();
-      printer.println(
-        `This is not a legal receipt. Please ask your legal receipt.`,
-      );
-      printer.println(`Thank you!`);
+      println(`This is not a legal receipt. Please ask your legal receipt.`);
+      println(`Thank you!`);
     }
-  } else if (data?.round?.category === "ROUND_SLIP") {
-    const total = data?.items?.reduce((a, b) => a + Number(b.amount), 0);
+  } else if (roundCategory === "ROUND_SLIP") {
+    const total = items.reduce((a, b) => a + Number(b?.amount || 0), 0);
     printer.alignRight();
     printer.setTextDoubleWidth();
-    printer.println(`Total: ${helper.formatMoney(total)}`);
+    println(`Total: ${helper.formatMoney(total)}`);
     printer.setTextNormal();
     printer.drawLine();
     printer.alignCenter();
-    printer.println(
+    println(
       "This is neither a legal receipt or final invoice. It is just a round total slip.",
     );
   }
@@ -1649,14 +1913,14 @@ const helper = {
     if (!number || isNaN(number)) {
       return "0";
     }
-    let str = number.toString();
+    let str = String(number);
     const decimalIndex = str.indexOf(".");
     const decimalPlaces = 3;
     if (decimalIndex !== -1) {
       const limitedDecimal = str.substr(decimalIndex + 1, decimalPlaces);
       str = str.substr(0, decimalIndex + 1) + limitedDecimal;
     }
-    return str.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    return str.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   },
 
   empty(mixedVar) {
@@ -1711,17 +1975,18 @@ const helper = {
 
   generateVoucherNo(no) {
     if (!no) return "0000";
-    let len = no.toString().length;
-    if (len >= 4) return no.toString();
+    const stringNo = String(no);
+    let len = stringNo.length;
+    if (len >= 4) return stringNo;
     if (len == 1) return `000${no}`;
     if (len == 2) return `00${no}`;
     if (len == 3) return `0${no}`;
-    return no.toString();
+    return stringNo;
   },
 
   padNumber(number, targetedLength = 5) {
     if (!number || isNaN(number)) return "0".repeat(targetedLength);
-    let strNumber = number.toString();
+    let strNumber = String(number);
     if (strNumber.length < targetedLength) {
       let padding = "0".repeat(targetedLength - strNumber.length);
       return padding + strNumber;
