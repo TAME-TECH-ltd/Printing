@@ -30,6 +30,7 @@ const PRINT_JOB_STATUS = {
   PENDING: "pending",
   PROCESSING: "processing",
   COMPLETED: "completed",
+  UNCERTAIN: "uncertain",
 };
 
 const PRINT_QUEUE_BASE_DELAY_MS = 3000;
@@ -101,6 +102,28 @@ function initializeDatabase() {
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_print_jobs_status_retry
       ON print_jobs (status, next_retry_at, created_at);
+    `);
+
+    // A renderer can be restarted while a fetch is still resolving. Keep only one
+    // active local job for the same round/printer even in that race.
+    db.exec(`
+      DELETE FROM print_jobs
+      WHERE id IN (
+        SELECT duplicate.id
+        FROM print_jobs AS duplicate
+        INNER JOIN print_jobs AS retained
+          ON retained.round_id = duplicate.round_id
+          AND retained.printer_key = duplicate.printer_key
+          AND retained.id < duplicate.id
+          AND retained.status IN ('pending', 'processing', 'uncertain')
+        WHERE duplicate.round_id IS NOT NULL
+          AND duplicate.status IN ('pending', 'processing', 'uncertain')
+      );
+    `);
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_print_jobs_active_round_printer
+      ON print_jobs (round_id, printer_key)
+      WHERE round_id IS NOT NULL AND status IN ('pending', 'processing', 'uncertain');
     `);
 
     db.exec(`
@@ -1253,7 +1276,7 @@ function enqueuePrintJob(data = {}) {
         `
           SELECT id
           FROM print_jobs
-          WHERE round_id = ? AND printer_key = ? AND status IN (?, ?)
+          WHERE round_id = ? AND printer_key = ? AND status IN (?, ?, ?)
           ORDER BY id DESC
           LIMIT 1
         `,
@@ -1263,6 +1286,7 @@ function enqueuePrintJob(data = {}) {
         printerKey,
         PRINT_JOB_STATUS.PENDING,
         PRINT_JOB_STATUS.PROCESSING,
+        PRINT_JOB_STATUS.UNCERTAIN,
       );
 
     if (existingJob) {
@@ -1411,6 +1435,28 @@ function markPrintJobForRetry(job, error) {
   return retryDelayMs;
 }
 
+function markPrintJobUncertain(job, error) {
+  const now = nowIsoString();
+  const message = truncateErrorMessage(error);
+
+  db.prepare(
+    `
+      UPDATE print_jobs
+      SET status = ?, last_error = ?, locked_at = NULL, updated_at = ?
+      WHERE id = ?
+    `,
+  ).run(PRINT_JOB_STATUS.UNCERTAIN, message, now, job.id);
+
+  mainWindow?.webContents.send("print-error", {
+    message:
+      "Printer result is unknown; automatic retry was stopped to prevent a duplicate ticket. Review the job and retry manually only if it did not print.",
+    error: message,
+    attempts: Number(job?.attempts || 0) + 1,
+    roundId: job?.round_id || null,
+    printerName: getPrinterDisplayName(job?.printer_key),
+  });
+}
+
 function getRetryDelayUntil(nextRetryAt) {
   if (!nextRetryAt) return 0;
   const nextTimestamp = new Date(nextRetryAt).getTime();
@@ -1507,6 +1553,21 @@ async function processPrintQueue(printerKey) {
     schedulePrintQueue(printerKey, 0);
   } catch (error) {
     console.error("Print job failed:", error);
+    if (error?.printMayHaveStarted) {
+      markPrintJobUncertain(job, error);
+      insertPrintLog({
+        printer_id: job.printer_id,
+        printer_key: printerKey,
+        round_id: job.round_id,
+        job_id: job.id,
+        event_type: "uncertain",
+        status: "warning",
+        message: truncateErrorMessage(error),
+      });
+      sendDashboardUpdate();
+      return;
+    }
+
     const retryDelayMs = markPrintJobForRetry(job, error);
     insertPrintLog({
       printer_id: job.printer_id,
@@ -1775,11 +1836,20 @@ async function performPrintJob(data) {
     printer.beep();
   }
 
-  await withTimeout(
-    printer.execute(),
-    PRINT_EXECUTION_TIMEOUT_MS,
-    "Printer execution",
-  );
+  try {
+    await withTimeout(
+      printer.execute(),
+      PRINT_EXECUTION_TIMEOUT_MS,
+      "Printer execution",
+    );
+  } catch (error) {
+    // Once execute begins the device may have received all or part of the ticket.
+    // Retrying automatically is unsafe for restaurant and hotel documents.
+    const executionError =
+      error instanceof Error ? error : new Error(String(error || "Printer execution failed"));
+    executionError.printMayHaveStarted = true;
+    throw executionError;
+  }
 }
 
 let mainWindow;

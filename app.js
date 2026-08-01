@@ -79,8 +79,9 @@ const CHARACTER_SET_OPTIONS = [
   { value: "ISO8859_2_LATIN2", label: "ISO Latin 2" },
   { value: "PC858_EURO", label: "Euro" },
 ];
-const REMOTE_METRICS_REFRESH_MS = 30000;
-const ACTIVE_QUEUE_REMOTE_REFRESH_MS = 5000;
+const REMOTE_METRICS_REFRESH_MS = 60000;
+const ACTIVE_QUEUE_REMOTE_REFRESH_MS = 15000;
+const PRINT_SERVICE_INSTANCE_ID_KEY = "printing-service-instance-id";
 
 const INVOICE_CONTENT_CODE = "I";
 const BASE_CONTENT_OPTIONS = [
@@ -198,11 +199,22 @@ const useApiClient = () => {
 };
 
 const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
-  const BASE_DELAY = 2000;
-  const INITIAL_RETRY_DELAY = 3000;
-  const MAX_RETRY_DELAY = 20000;
+  const BASE_DELAY = 5000;
+  const INITIAL_RETRY_DELAY = 5000;
+  const MAX_RETRY_DELAY = 60000;
   const isFetching = ref(false);
   const workerStates = ref({});
+
+  const getServiceInstanceId = () => {
+    let instanceId = localStorage.getItem(PRINT_SERVICE_INSTANCE_ID_KEY);
+    if (instanceId) return instanceId;
+
+    instanceId =
+      globalThis.crypto?.randomUUID?.() ||
+      `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(PRINT_SERVICE_INSTANCE_ID_KEY, instanceId);
+    return instanceId;
+  };
 
   const getPrinterWorkerKey = (printer) => {
     if (!printer) return "";
@@ -251,11 +263,15 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
 
   const buildFetchMeta = (printer, meta = null) => {
     const printerContent = normalizePrinterContent(printer?.content);
+    const printerKey = getPrinterWorkerKey(printer);
     return {
       ...(meta || {}),
       ...(printer?.id ? { printerId: printer.id } : {}),
-      ...(getPrinterWorkerKey(printer)
-        ? { printerKey: getPrinterWorkerKey(printer) }
+      ...(printerKey ? { printerKey } : {}),
+      // A stable, per-installation/per-printer token is the API lease owner.
+      // It survives app restarts, so a queued document can be acknowledged safely.
+      ...(printerKey
+        ? { clientToken: `ps:${getServiceInstanceId()}:${printerKey}`.slice(0, 100) }
         : {}),
       ...(printerContent ? { content: printerContent } : {}),
     };
@@ -344,12 +360,15 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
     if (!state) return;
 
     clearWorkerTimer(printerKey);
+    // Spread workers out so four printers do not hit the API in the same instant.
+    const jitter = Math.min(1000, Math.round(delay * 0.2));
+    const scheduledDelay = delay + Math.floor(Math.random() * (jitter + 1));
     state.timer = setTimeout(() => {
       const latestPrinter = getPrinterByKey(printerKey);
       if (state.isActive && latestPrinter) {
         startFetching(printerKey, meta);
       }
-    }, delay);
+    }, scheduledDelay);
   };
 
   const startFetching = async (printerKey, meta = null) => {
@@ -408,6 +427,7 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
         settings: { ...appSettings.value },
         printLogo: Boolean(printer.print_logo ?? 1),
         content: normalizePrinterContent(printer.content),
+        clientToken: requestMeta.clientToken,
       };
 
       try {
