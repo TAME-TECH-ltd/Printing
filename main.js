@@ -11,6 +11,7 @@ const {
 } = require("node-thermal-printer");
 const Database = require("better-sqlite3");
 const os = require("os");
+const { PNG } = require("pngjs");
 
 const userDataPath = app.getPath("userData");
 const dbFilePath = path.join(userDataPath, "printing.sqlite");
@@ -1585,6 +1586,242 @@ async function processPrintQueue(printerKey) {
   }
 }
 
+function formatEbmReceiptAmount(value) {
+  const amount = Number(value || 0);
+  return Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
+}
+
+function formatEbmReceiptDateTime(value) {
+  const timestamp = toPrintableString(value).trim();
+
+  if (/^\d{14}$/.test(timestamp)) {
+    return {
+      date: `${timestamp.slice(6, 8)}/${timestamp.slice(4, 6)}/${timestamp.slice(0, 4)}`,
+      time: `${timestamp.slice(8, 10)}:${timestamp.slice(10, 12)}:${timestamp.slice(12, 14)}`,
+    };
+  }
+
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return { date: "--", time: "--" };
+  }
+
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: helper.timeZone,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const valueFor = (type) => parts.find((part) => part.type === type)?.value || "--";
+
+  return {
+    date: `${valueFor("day")}/${valueFor("month")}/${valueFor("year")}`,
+    time: `${valueFor("hour")}:${valueFor("minute")}:${valueFor("second")}`,
+  };
+}
+
+function buildEbmReceiptQrData(invoiceMeta = {}) {
+  const publishedAt = toPrintableString(invoiceMeta?.vsdcRcptPbctDate).trim();
+  const fields = [
+    invoiceMeta?.sdcId,
+    invoiceMeta?.rcptNo,
+    invoiceMeta?.intrlData,
+    invoiceMeta?.rcptSign,
+  ].map((field) => toPrintableString(field).trim());
+
+  if (!/^\d{14}$/.test(publishedAt) || fields.some((field) => !field)) {
+    return null;
+  }
+
+  return [
+    `${publishedAt.slice(6, 8)}${publishedAt.slice(4, 6)}${publishedAt.slice(0, 4)}`,
+    publishedAt.slice(8, 14),
+    ...fields,
+  ].join("#");
+}
+
+function copyPngToCanvas(source, target, x, y) {
+  for (let row = 0; row < source.height; row += 1) {
+    const sourceStart = row * source.width * 4;
+    const targetStart = ((y + row) * target.width + x) * 4;
+    source.data.copy(
+      target.data,
+      targetStart,
+      sourceStart,
+      sourceStart + source.width * 4,
+    );
+  }
+}
+
+async function printEbmRraHeader(printer) {
+  try {
+    const headerWidth = 384;
+    const logoHeight = 58;
+    const logoPaths = [
+      path.join(__dirname, "assets", "img", "rra", "0.png"),
+      path.join(__dirname, "assets", "img", "rra", "1.png"),
+    ];
+    const logos = logoPaths.map((logoPath) => {
+      const image = nativeImage.createFromPath(logoPath);
+      if (image.isEmpty()) {
+        throw new Error(`Unable to load RRA logo: ${logoPath}`);
+      }
+
+      const { width, height } = image.getSize();
+      return PNG.sync.read(
+        image
+          .resize({
+            width: Math.max(1, Math.round((width * logoHeight) / Math.max(height, 1))),
+            height: logoHeight,
+          })
+          .toPNG(),
+      );
+    });
+    const header = new PNG({ width: headerWidth, height: logoHeight + 8 });
+    header.data.fill(255);
+
+    copyPngToCanvas(logos[0], header, 18, 4);
+    copyPngToCanvas(logos[1], header, headerWidth - logos[1].width - 18, 4);
+
+    printer.alignCenter();
+    await printer.printImageBuffer(PNG.sync.write(header));
+  } catch (error) {
+    console.warn("Unable to print RRA receipt logos:", error?.message || error);
+  }
+}
+
+async function printNormalSaleEbmInvoice(printer, data, helpers) {
+  const { order = {}, settings = {}, items = [], supportsQr } = data;
+  const { println, tableCustom } = helpers;
+  const invoiceMeta = order?.ebm_meta || {};
+  const invoiceDateTime = formatEbmReceiptDateTime(
+    order?.ebm_created_at || order?.order_time || order?.system_date,
+  );
+  const receiptDateTime = formatEbmReceiptDateTime(invoiceMeta?.vsdcRcptPbctDate);
+  const taxTotals = items.reduce(
+    (totals, item = {}) => {
+      const amount = Number(item?.amount || 0);
+      if (toPrintableString(item?.tax_type).toUpperCase() === "B") {
+        totals.taxableB += amount;
+      } else {
+        totals.taxableA += amount;
+      }
+      return totals;
+    },
+    { taxableA: 0, taxableB: 0 },
+  );
+  const totalTax = Number(order?.total_taxes || 0);
+  const qrData = buildEbmReceiptQrData(invoiceMeta);
+
+  await printEbmRraHeader(printer);
+  printer.alignCenter();
+  printer.bold(true);
+  println(settings?.site_name);
+  printer.bold(false);
+  if (toPrintableString(settings?.site_address).trim()) {
+    println(`Address:${toPrintableString(settings?.site_address)}`);
+  }
+  println(`TIN: ${toPrintableString(settings?.app_tin)}`);
+  printer.drawLine();
+
+  if (toPrintableString(settings?.top_message).trim()) {
+    println(settings?.top_message);
+  }
+  println(`Client ID: ${toPrintableString(order?.client_reference, "--")}`);
+  printer.drawLine();
+
+  printer.alignLeft();
+  items.forEach((item = {}) => {
+    println(item?.name);
+    tableCustom([
+      { text: formatEbmReceiptAmount(item?.price), align: "LEFT", width: 0.3 },
+      { text: formatEbmReceiptAmount(item?.quantity || 1), align: "CENTER", width: 0.18 },
+      { text: formatEbmReceiptAmount(item?.amount), align: "RIGHT", width: 0.34 },
+      {
+        text: toPrintableString(item?.tax_type).toUpperCase() === "B" ? "B" : "A-EX",
+        align: "CENTER",
+        width: 0.18,
+      },
+    ]);
+  });
+
+  printer.drawLine();
+  tableCustom([
+    { text: "TOTAL:", align: "LEFT", width: 0.55, bold: true },
+    { text: formatEbmReceiptAmount(order?.grand_total), align: "RIGHT", width: 0.45, bold: true },
+  ]);
+  if (taxTotals.taxableA) {
+    tableCustom([
+      { text: "TOTAL A-EX:", align: "LEFT", width: 0.55 },
+      { text: formatEbmReceiptAmount(taxTotals.taxableA), align: "RIGHT", width: 0.45 },
+    ]);
+  }
+  tableCustom([
+    { text: "TOTAL B-18%:", align: "LEFT", width: 0.55 },
+    { text: formatEbmReceiptAmount(taxTotals.taxableB), align: "RIGHT", width: 0.45 },
+  ]);
+  tableCustom([
+    { text: "TOTAL TAX B:", align: "LEFT", width: 0.55 },
+    { text: formatEbmReceiptAmount(totalTax), align: "RIGHT", width: 0.45 },
+  ]);
+  tableCustom([
+    { text: "TOTAL TAX:", align: "LEFT", width: 0.55 },
+    { text: formatEbmReceiptAmount(totalTax), align: "RIGHT", width: 0.45 },
+  ]);
+  printer.drawLine();
+  tableCustom([
+    { text: "CASH:", align: "LEFT", width: 0.55 },
+    { text: formatEbmReceiptAmount(order?.grand_total), align: "RIGHT", width: 0.45 },
+  ]);
+  tableCustom([
+    { text: "ITEMS NUMBER:", align: "LEFT", width: 0.7 },
+    { text: toPrintableString(items.length), align: "RIGHT", width: 0.3 },
+  ]);
+  printer.drawLine();
+
+  printer.alignCenter();
+  printer.bold(true);
+  println("SDC INFORMATION");
+  printer.bold(false);
+  tableCustom([
+    { text: `Date: ${invoiceDateTime.date}`, align: "LEFT", width: 0.5 },
+    { text: `Time: ${invoiceDateTime.time}`, align: "RIGHT", width: 0.5 },
+  ]);
+  printer.alignLeft();
+  println(`SDC ID: ${toPrintableString(invoiceMeta?.sdcId)}`);
+  println(`RECEIPT NUMBER: ${toPrintableString(invoiceMeta?.rcptNo)} NS`);
+  println(`Internal Data: ${toPrintableString(invoiceMeta?.intrlData)}`);
+  println(`Receipt Signature: ${toPrintableString(invoiceMeta?.rcptSign)}`);
+  printer.drawLine();
+
+  if (qrData && supportsQr) {
+    printer.alignCenter();
+    printer.printQR(qrData, { cellSize: 3, correction: "Q" });
+  } else if (qrData) {
+    printer.alignLeft();
+    println(`QR Data: ${qrData}`);
+  }
+  printer.drawLine();
+
+  printer.alignLeft();
+  println(`RECEIPT NUMBER: ${toPrintableString(order?.ebm_invoice_id, order?.id)}`);
+  tableCustom([
+    { text: `Date: ${receiptDateTime.date}`, align: "LEFT", width: 0.5 },
+    { text: `Time: ${receiptDateTime.time}`, align: "RIGHT", width: 0.5 },
+  ]);
+  println(`MRC: ${toPrintableString(invoiceMeta?.mrcNo)}`);
+  printer.drawLine();
+  printer.alignCenter();
+  if (toPrintableString(settings?.bottom_message).trim()) {
+    println(settings?.bottom_message);
+  }
+  println("TAME APPS 1.8 Powered by RRA VSDC EBM 2.1");
+}
+
 async function performPrintJob(data) {
   const transport = resolvePrinterTransport(data);
   const supportsCut = data?.supportsCut !== false;
@@ -1624,6 +1861,42 @@ async function performPrintJob(data) {
   const println = (text, fallback = "") =>
     printer.println(toPrintableString(text, fallback));
   const tableCustom = (rows) => printer.tableCustom(sanitizeTableRows(rows));
+
+  const isNormalSaleEbmInvoice =
+    roundCategory === "INVOICE" &&
+    Boolean(order?.ebm_meta) &&
+    toPrintableString(order?.ebm_invoice_type).toUpperCase() === "NS";
+
+  if (isNormalSaleEbmInvoice) {
+    await printNormalSaleEbmInvoice(
+      printer,
+      { order, settings, items, supportsQr },
+      { println, tableCustom },
+    );
+
+    if (supportsCut) {
+      printer.cut();
+    }
+
+    if (supportsBeep) {
+      printer.beep();
+    }
+
+    try {
+      await withTimeout(
+        printer.execute(),
+        PRINT_EXECUTION_TIMEOUT_MS,
+        "Printer execution",
+      );
+    } catch (error) {
+      const executionError =
+        error instanceof Error ? error : new Error(String(error || "Printer execution failed"));
+      executionError.printMayHaveStarted = true;
+      throw executionError;
+    }
+
+    return;
+  }
 
   printer.alignCenter();
   printer.setTypeFontA();
