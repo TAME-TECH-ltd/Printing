@@ -19,26 +19,57 @@ const encodeQuery = (url, data) => {
     : `${url}?${query.slice(0, -1)}`;
 };
 
-function addBkendIfProduction(baseUrl, path) {
+const LOCAL_DEVELOPMENT_PORT = "8000";
+
+const isLocalDevelopmentHost = (hostname) => {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname.endsWith(".localhost")
+  );
+};
+
+function normalizeLocalDevelopmentUrl(baseUrl) {
+  const value = String(baseUrl || "").trim().replace(/\/+$/, "");
+
   try {
-    const parsed = new URL(baseUrl);
+    const parsed = new URL(value);
     if (
-      parsed.hostname === "localhost" ||
-      parsed.hostname === "127.0.0.1" ||
-      parsed.hostname.endsWith(".localhost")
+      parsed.protocol === "http:" &&
+      isLocalDevelopmentHost(parsed.hostname) &&
+      !parsed.port
     ) {
-      return `${baseUrl}${path}`;
+      parsed.port = LOCAL_DEVELOPMENT_PORT;
+      return parsed.toString().replace(/\/$/, "");
     }
   } catch {
-    if (baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1")) {
-      return `${baseUrl}${path}`;
+    // Keep the original value so the existing connection error remains useful.
+  }
+
+  return value;
+}
+
+function addBkendIfProduction(baseUrl, path) {
+  const normalizedBaseUrl = normalizeLocalDevelopmentUrl(baseUrl);
+
+  try {
+    const parsed = new URL(normalizedBaseUrl);
+    if (isLocalDevelopmentHost(parsed.hostname)) {
+      return `${normalizedBaseUrl}${path}`;
+    }
+  } catch {
+    if (
+      normalizedBaseUrl.includes("localhost") ||
+      normalizedBaseUrl.includes("127.0.0.1")
+    ) {
+      return `${normalizedBaseUrl}${path}`;
     }
   }
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
   let insertPath = cleanPath.startsWith("/bkend/")
     ? cleanPath
     : `/bkend${cleanPath}`;
-  return `${baseUrl}${insertPath}`;
+  return `${normalizedBaseUrl}${insertPath}`;
 }
 
 function safeJsonParse(value, fallback = null) {
@@ -85,6 +116,12 @@ const PRINT_SERVICE_INSTANCE_ID_KEY = "printing-service-instance-id";
 
 const INVOICE_CONTENT_CODE = "I";
 const BASE_CONTENT_OPTIONS = [
+  // These are the legacy POS destinations. Keep them available when a tenant
+  // has not yet configured pos_destinations, or the destination request is
+  // temporarily unavailable. Without them a new printer can accidentally be
+  // saved with only `I`, which excludes every order round from its polling.
+  { code: "KITCHEN", name: "Kitchen Orders", type: "destination" },
+  { code: "BAR", name: "Bar Orders", type: "destination" },
   { code: INVOICE_CONTENT_CODE, name: "Invoices", type: "invoice" },
 ];
 
@@ -97,7 +134,10 @@ const normalizeContentCode = (value) => {
     .replace(/[\s-]+/g, "_");
 
   if (!normalized) return null;
-  if (normalized === "INVOICE" || normalized === "INVOICES") return INVOICE_CONTENT_CODE;
+  if (normalized === "INVOICE" || normalized === "INVOICES")
+    return INVOICE_CONTENT_CODE;
+  if (normalized === "K") return "KITCHEN";
+  if (normalized === "B") return "BAR";
 
   return normalized;
 };
@@ -109,7 +149,7 @@ const formatContentLabel = (value) => {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 };
 
-const buildContentOptions = (destinations = []) => {
+const buildContentOptions = (destinations = [], configuredContent = []) => {
   const destinationOptions = Array.isArray(destinations)
     ? destinations
         .map((destination) => ({
@@ -120,7 +160,30 @@ const buildContentOptions = (destinations = []) => {
         .filter((option) => option.code)
     : [];
 
-  return [...destinationOptions, ...BASE_CONTENT_OPTIONS];
+  // Do not hide a saved content code just because its destination has since
+  // been deactivated, or because this app could not refresh the destination
+  // catalogue. This keeps an edit/save cycle from narrowing a printer to
+  // invoices only.
+  const configuredOptions = Array.isArray(configuredContent)
+    ? configuredContent
+        .map((code) => normalizeContentCode(code))
+        .filter(Boolean)
+        .map((code) => ({
+          code,
+          name:
+            code === INVOICE_CONTENT_CODE
+              ? "Invoices"
+              : formatContentLabel(code),
+          type: code === INVOICE_CONTENT_CODE ? "invoice" : "destination",
+        }))
+    : [];
+
+  const optionsByCode = new Map();
+  [...BASE_CONTENT_OPTIONS, ...configuredOptions, ...destinationOptions].forEach(
+    (option) => optionsByCode.set(option.code, option),
+  );
+
+  return [...optionsByCode.values()];
 };
 
 const extractPrintableContentCodes = (rawContent) => {
@@ -146,12 +209,14 @@ const extractPrintableContentCodes = (rawContent) => {
   const value = String(normalized).trim();
   if (!value) return [];
 
-  return [...new Set(
-    value
-      .split(/[\s,|;]+/)
-      .map(normalizeContentCode)
-      .filter(Boolean),
-  )];
+  return [
+    ...new Set(
+      value
+        .split(/[\s,|;]+/)
+        .map(normalizeContentCode)
+        .filter(Boolean),
+    ),
+  ];
 };
 
 const normalizePrinterContent = (rawContent) => {
@@ -271,7 +336,12 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
       // A stable, per-installation/per-printer token is the API lease owner.
       // It survives app restarts, so a queued document can be acknowledged safely.
       ...(printerKey
-        ? { clientToken: `ps:${getServiceInstanceId()}:${printerKey}`.slice(0, 100) }
+        ? {
+            clientToken: `ps:${getServiceInstanceId()}:${printerKey}`.slice(
+              0,
+              100,
+            ),
+          }
         : {}),
       ...(printerContent ? { content: printerContent } : {}),
     };
@@ -337,7 +407,10 @@ const useFetchingService = (url, activePrinters, appSettings, outletCode) => {
       return Math.min(retryAfterSeconds * 1000, MAX_RETRY_DELAY);
     }
 
-    return Math.min(Math.max(INITIAL_RETRY_DELAY, BASE_DELAY * 2), MAX_RETRY_DELAY);
+    return Math.min(
+      Math.max(INITIAL_RETRY_DELAY, BASE_DELAY * 2),
+      MAX_RETRY_DELAY,
+    );
   };
 
   const removeLatestFromMeta = (meta = null) => {
@@ -619,6 +692,7 @@ const App = {
     const printerType = ref(PRINTER_TYPES.EPSON);
     const printerInterface = ref(PRINTER_INTERFACES.TCP);
     const availableContentOptions = ref(BASE_CONTENT_OPTIONS);
+    const loadedDestinationOptions = ref([]);
     const content = ref([]);
     const supportsCut = ref(true);
     const supportsBeep = ref(true);
@@ -697,9 +771,23 @@ const App = {
         : addBkendIfProduction(url.value, "/api/print-queue-metrics");
     };
 
+    const configuredContentCodes = () => [
+      ...activePrinters.value.flatMap((printer) =>
+        extractPrintableContentCodes(printer.content),
+      ),
+      ...content.value,
+    ];
+
+    const refreshContentOptions = () => {
+      availableContentOptions.value = buildContentOptions(
+        loadedDestinationOptions.value,
+        configuredContentCodes(),
+      );
+    };
+
     const fetchDestinationOptions = async ({ silent = true } = {}) => {
       if (!url.value) {
-        availableContentOptions.value = BASE_CONTENT_OPTIONS;
+        refreshContentOptions();
         return;
       }
 
@@ -710,10 +798,17 @@ const App = {
 
       try {
         const response = await axios.get(requestUrl);
-        const rows = response?.data?.rows || [];
-        availableContentOptions.value = buildContentOptions(rows);
+        if (!Array.isArray(response?.data?.rows)) {
+          throw new Error("Invalid destinations response");
+        }
+
+        loadedDestinationOptions.value = response.data.rows;
+        refreshContentOptions();
       } catch (error) {
-        availableContentOptions.value = BASE_CONTENT_OPTIONS;
+        // Keep the last successful catalogue (and the legacy fallback) rather
+        // than replacing all order destinations with the invoice option.
+        console.warn("Failed to load destinations:", error);
+        refreshContentOptions();
         if (!silent) {
           toggleFlashMessage({
             type: "warning",
@@ -841,9 +936,11 @@ const App = {
             checkedAtLabel: null,
           };
           if (Array.isArray(response.dashboard.printers)) {
-            activePrinters.value = response.dashboard.printers.map((printer) => ({
-              ...printer,
-            }));
+            activePrinters.value = response.dashboard.printers.map(
+              (printer) => ({
+                ...printer,
+              }),
+            );
           }
           await refreshRemoteQueueMetrics({
             force: !silent,
@@ -937,7 +1034,7 @@ const App = {
         const { settings, printers } = data;
         activePrinters.value = printers;
         if (settings && Object.keys(settings).length > 0) {
-          url.value = settings.base_url;
+          url.value = normalizeLocalDevelopmentUrl(settings.base_url);
           outletCode.value = settings.outlet_code || "";
           lastRemoteMetricsFetchAt.value = 0;
           fetchDestinationOptions({ silent: true });
@@ -1140,12 +1237,12 @@ const App = {
         content.value = extractPrintableContentCodes(
           safeJsonParse(printer.content, []),
         );
+        refreshContentOptions();
         supportsCut.value = Boolean(printer.supports_cut ?? 1);
         supportsBeep.value = Boolean(printer.supports_beep ?? 1);
         supportsQr.value = Boolean(printer.supports_qr ?? 1);
         printLogo.value = Boolean(printer.print_logo ?? 1);
-        printerCharacterSet.value =
-          printer.character_set || "PC852_LATIN2";
+        printerCharacterSet.value = printer.character_set || "PC852_LATIN2";
 
         printerForm.value = {
           id: printer.id,
@@ -1328,10 +1425,13 @@ const App = {
       setPrinterActionLoading(printer.id, "pause", true);
 
       try {
-        const response = await window.electronAPI.invoke("toggle-printer-pause", {
-          printerId: printer.id,
-          paused: nextPaused,
-        });
+        const response = await window.electronAPI.invoke(
+          "toggle-printer-pause",
+          {
+            printerId: printer.id,
+            paused: nextPaused,
+          },
+        );
 
         if (!response?.success) {
           throw new Error(response?.message || "Failed to update printer");

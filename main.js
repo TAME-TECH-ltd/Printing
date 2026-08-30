@@ -654,6 +654,7 @@ async function buildStartupChecks() {
       status: "ok",
       message: "SQLite queue database is available",
     },
+    getAutoLaunchCheck(),
     {
       key: "queue",
       label: "Queue recovery",
@@ -999,19 +1000,52 @@ function getOptionalLogoSource(data = {}) {
   return null;
 }
 
-function addBackendPathIfNeeded(baseUrl, assetPath) {
+const LOCAL_DEVELOPMENT_PORT = "8000";
+
+function isLocalDevelopmentHost(hostname) {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname.endsWith(".localhost")
+  );
+}
+
+function normalizeLocalDevelopmentUrl(baseUrl) {
+  const value = String(baseUrl || "")
+    .trim()
+    .replace(/\/+$/, "");
+
   try {
-    const parsed = new URL(baseUrl);
+    const parsed = new URL(value);
     if (
-      parsed.hostname === "localhost" ||
-      parsed.hostname === "127.0.0.1" ||
-      parsed.hostname.endsWith(".localhost")
+      parsed.protocol === "http:" &&
+      isLocalDevelopmentHost(parsed.hostname) &&
+      !parsed.port
     ) {
-      return `${baseUrl}${assetPath}`;
+      parsed.port = LOCAL_DEVELOPMENT_PORT;
+      return parsed.toString().replace(/\/$/, "");
     }
   } catch {
-    if (baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1")) {
-      return `${baseUrl}${assetPath}`;
+    // Let the consumer report the existing invalid-url error.
+  }
+
+  return value;
+}
+
+function addBackendPathIfNeeded(baseUrl, assetPath) {
+  const normalizedBaseUrl = normalizeLocalDevelopmentUrl(baseUrl);
+
+  try {
+    const parsed = new URL(normalizedBaseUrl);
+    if (isLocalDevelopmentHost(parsed.hostname)) {
+      return `${normalizedBaseUrl}${assetPath}`;
+    }
+  } catch {
+    if (
+      normalizedBaseUrl.includes("localhost") ||
+      normalizedBaseUrl.includes("127.0.0.1")
+    ) {
+      return `${normalizedBaseUrl}${assetPath}`;
     }
   }
 
@@ -1019,7 +1053,7 @@ function addBackendPathIfNeeded(baseUrl, assetPath) {
   const insertPath = cleanPath.startsWith("/bkend/")
     ? cleanPath
     : `/bkend${cleanPath}`;
-  return `${baseUrl}${insertPath}`;
+  return `${normalizedBaseUrl}${insertPath}`;
 }
 
 function isHttpUrl(value) {
@@ -1616,7 +1650,8 @@ function formatEbmReceiptDateTime(value) {
     second: "2-digit",
     hour12: false,
   }).formatToParts(date);
-  const valueFor = (type) => parts.find((part) => part.type === type)?.value || "--";
+  const valueFor = (type) =>
+    parts.find((part) => part.type === type)?.value || "--";
 
   return {
     date: `${valueFor("day")}/${valueFor("month")}/${valueFor("year")}`,
@@ -1657,10 +1692,33 @@ function copyPngToCanvas(source, target, x, y) {
   }
 }
 
+function makeThermalLogo(source) {
+  const output = new PNG({ width: source.width, height: source.height });
+
+  for (let index = 0; index < source.data.length; index += 4) {
+    const red = source.data[index];
+    const green = source.data[index + 1];
+    const blue = source.data[index + 2];
+    const alpha = source.data[index + 3];
+    // Thermal printers work in black and white. Treat any visible coloured or
+    // dark pixel as ink, rather than relying on the printer's brightness
+    // threshold (which made the light RRA logo disappear).
+    const isInk = alpha > 20 && Math.min(red, green, blue) < 245;
+    const value = isInk ? 0 : 255;
+
+    output.data[index] = value;
+    output.data[index + 1] = value;
+    output.data[index + 2] = value;
+    output.data[index + 3] = 255;
+  }
+
+  return output;
+}
+
 async function printEbmRraHeader(printer) {
   try {
     const headerWidth = 384;
-    const logoHeight = 58;
+    const logoHeight = 78;
     const logoPaths = [
       path.join(__dirname, "assets", "img", "rra", "0.png"),
       path.join(__dirname, "assets", "img", "rra", "1.png"),
@@ -1672,20 +1730,25 @@ async function printEbmRraHeader(printer) {
       }
 
       const { width, height } = image.getSize();
-      return PNG.sync.read(
-        image
-          .resize({
-            width: Math.max(1, Math.round((width * logoHeight) / Math.max(height, 1))),
-            height: logoHeight,
-          })
-          .toPNG(),
+      return makeThermalLogo(
+        PNG.sync.read(
+          image
+            .resize({
+              width: Math.max(
+                1,
+                Math.round((width * logoHeight) / Math.max(height, 1)),
+              ),
+              height: logoHeight,
+            })
+            .toPNG(),
+        ),
       );
     });
-    const header = new PNG({ width: headerWidth, height: logoHeight + 8 });
+    const header = new PNG({ width: headerWidth, height: logoHeight + 12 });
     header.data.fill(255);
 
-    copyPngToCanvas(logos[0], header, 18, 4);
-    copyPngToCanvas(logos[1], header, headerWidth - logos[1].width - 18, 4);
+    copyPngToCanvas(logos[0], header, 14, 6);
+    copyPngToCanvas(logos[1], header, headerWidth - logos[1].width - 14, 6);
 
     printer.alignCenter();
     await printer.printImageBuffer(PNG.sync.write(header));
@@ -1701,7 +1764,9 @@ async function printNormalSaleEbmInvoice(printer, data, helpers) {
   const invoiceDateTime = formatEbmReceiptDateTime(
     order?.ebm_created_at || order?.order_time || order?.system_date,
   );
-  const receiptDateTime = formatEbmReceiptDateTime(invoiceMeta?.vsdcRcptPbctDate);
+  const receiptDateTime = formatEbmReceiptDateTime(
+    invoiceMeta?.vsdcRcptPbctDate,
+  );
   const taxTotals = items.reduce(
     (totals, item = {}) => {
       const amount = Number(item?.amount || 0);
@@ -1716,6 +1781,20 @@ async function printNormalSaleEbmInvoice(printer, data, helpers) {
   );
   const totalTax = Number(order?.total_taxes || 0);
   const qrData = buildEbmReceiptQrData(invoiceMeta);
+  // tableCustom rounds fractional widths up. A 45%/55% split on its 48-column
+  // printer width becomes 22 + 27 columns, which is 49 and wraps the final
+  // character. Use exact columns for financial values.
+  const printEbmTotalRow = (label, amount, bold = false) => {
+    tableCustom([
+      { text: label, align: "LEFT", cols: 20, bold },
+      {
+        text: formatEbmReceiptAmount(amount),
+        align: "RIGHT",
+        cols: 28,
+        bold,
+      },
+    ]);
+  };
 
   await printEbmRraHeader(printer);
   printer.alignCenter();
@@ -1738,48 +1817,41 @@ async function printNormalSaleEbmInvoice(printer, data, helpers) {
   items.forEach((item = {}) => {
     println(item?.name);
     tableCustom([
-      { text: formatEbmReceiptAmount(item?.price), align: "LEFT", width: 0.3 },
-      { text: formatEbmReceiptAmount(item?.quantity || 1), align: "CENTER", width: 0.18 },
-      { text: formatEbmReceiptAmount(item?.amount), align: "RIGHT", width: 0.34 },
+      { text: formatEbmReceiptAmount(item?.price), align: "LEFT", cols: 14 },
       {
-        text: toPrintableString(item?.tax_type).toUpperCase() === "B" ? "B" : "A-EX",
+        text: formatEbmReceiptAmount(item?.quantity || 1),
         align: "CENTER",
-        width: 0.18,
+        cols: 8,
+      },
+      {
+        text: formatEbmReceiptAmount(item?.amount),
+        align: "RIGHT",
+        cols: 18,
+      },
+      {
+        text:
+          toPrintableString(item?.tax_type).toUpperCase() === "B"
+            ? "B"
+            : "A-EX",
+        align: "CENTER",
+        cols: 8,
       },
     ]);
   });
 
   printer.drawLine();
-  tableCustom([
-    { text: "TOTAL:", align: "LEFT", width: 0.55, bold: true },
-    { text: formatEbmReceiptAmount(order?.grand_total), align: "RIGHT", width: 0.45, bold: true },
-  ]);
+  printEbmTotalRow("TOTAL:", order?.grand_total, true);
   if (taxTotals.taxableA) {
-    tableCustom([
-      { text: "TOTAL A-EX:", align: "LEFT", width: 0.55 },
-      { text: formatEbmReceiptAmount(taxTotals.taxableA), align: "RIGHT", width: 0.45 },
-    ]);
+    printEbmTotalRow("TOTAL A-EX:", taxTotals.taxableA);
   }
-  tableCustom([
-    { text: "TOTAL B-18%:", align: "LEFT", width: 0.55 },
-    { text: formatEbmReceiptAmount(taxTotals.taxableB), align: "RIGHT", width: 0.45 },
-  ]);
-  tableCustom([
-    { text: "TOTAL TAX B:", align: "LEFT", width: 0.55 },
-    { text: formatEbmReceiptAmount(totalTax), align: "RIGHT", width: 0.45 },
-  ]);
-  tableCustom([
-    { text: "TOTAL TAX:", align: "LEFT", width: 0.55 },
-    { text: formatEbmReceiptAmount(totalTax), align: "RIGHT", width: 0.45 },
-  ]);
+  printEbmTotalRow("TOTAL B-18%:", taxTotals.taxableB);
+  printEbmTotalRow("TOTAL TAX B:", totalTax);
+  printEbmTotalRow("TOTAL TAX:", totalTax);
   printer.drawLine();
+  printEbmTotalRow("CASH:", order?.grand_total);
   tableCustom([
-    { text: "CASH:", align: "LEFT", width: 0.55 },
-    { text: formatEbmReceiptAmount(order?.grand_total), align: "RIGHT", width: 0.45 },
-  ]);
-  tableCustom([
-    { text: "ITEMS NUMBER:", align: "LEFT", width: 0.7 },
-    { text: toPrintableString(items.length), align: "RIGHT", width: 0.3 },
+    { text: "ITEMS NUMBER:", align: "LEFT", cols: 34 },
+    { text: toPrintableString(items.length), align: "RIGHT", cols: 14 },
   ]);
   printer.drawLine();
 
@@ -1808,7 +1880,9 @@ async function printNormalSaleEbmInvoice(printer, data, helpers) {
   printer.drawLine();
 
   printer.alignLeft();
-  println(`RECEIPT NUMBER: ${toPrintableString(order?.ebm_invoice_id, order?.id)}`);
+  println(
+    `RECEIPT NUMBER: ${toPrintableString(order?.ebm_invoice_id, order?.id)}`,
+  );
   tableCustom([
     { text: `Date: ${receiptDateTime.date}`, align: "LEFT", width: 0.5 },
     { text: `Time: ${receiptDateTime.time}`, align: "RIGHT", width: 0.5 },
@@ -1890,7 +1964,9 @@ async function performPrintJob(data) {
       );
     } catch (error) {
       const executionError =
-        error instanceof Error ? error : new Error(String(error || "Printer execution failed"));
+        error instanceof Error
+          ? error
+          : new Error(String(error || "Printer execution failed"));
       executionError.printMayHaveStarted = true;
       throw executionError;
     }
@@ -2119,7 +2195,9 @@ async function performPrintJob(data) {
     // Once execute begins the device may have received all or part of the ticket.
     // Retrying automatically is unsafe for restaurant and hotel documents.
     const executionError =
-      error instanceof Error ? error : new Error(String(error || "Printer execution failed"));
+      error instanceof Error
+        ? error
+        : new Error(String(error || "Printer execution failed"));
     executionError.printMayHaveStarted = true;
     throw executionError;
   }
@@ -2128,6 +2206,7 @@ async function performPrintJob(data) {
 let mainWindow;
 let tray = null;
 let isQuiting = false;
+const HIDDEN_LAUNCH_ARGUMENT = "--hidden";
 
 app.setName("Printing Service");
 app.setAppUserModelId("com.tame.printingservice");
@@ -2142,16 +2221,91 @@ function getIconPath() {
   return path.join(__dirname, "assets", "app-icon", "png", "512x512.png");
 }
 
-app.setLoginItemSettings(
-  {
+function isHiddenLaunch(commandLine = process.argv) {
+  return (
+    Array.isArray(commandLine) && commandLine.includes(HIDDEN_LAUNCH_ARGUMENT)
+  );
+}
+
+function configureAutoLaunch() {
+  if (!app.isPackaged || !["win32", "darwin"].includes(process.platform)) {
+    return;
+  }
+
+  const settings = {
     openAtLogin: true,
-    openAsHidden: true,
+    enabled: true,
     name: "Printing Service",
     path: process.execPath,
-    args: ["--hidden"],
-  },
-  "user",
-);
+    // Windows does not support Electron's openAsHidden option. This argument is
+    // handled by this app so startup stays invisible on every supported platform.
+    args: [HIDDEN_LAUNCH_ARGUMENT],
+  };
+
+  try {
+    app.setLoginItemSettings(settings);
+
+    const current = app.getLoginItemSettings({
+      path: settings.path,
+      args: settings.args,
+    });
+    console.log("Automatic startup configured:", {
+      openAtLogin: current.openAtLogin,
+      enabled: current.enabled,
+      path: settings.path,
+      args: settings.args,
+    });
+  } catch (error) {
+    // A Windows policy can prevent startup registration. The printing service must
+    // still start normally and remain usable when that happens.
+    console.error("Unable to configure automatic startup:", error);
+  }
+}
+
+function getAutoLaunchCheck() {
+  if (!app.isPackaged) {
+    return {
+      key: "automatic-startup",
+      label: "Automatic startup",
+      status: "warning",
+      message:
+        "Automatic startup is configured only in the installed application",
+    };
+  }
+
+  if (!["win32", "darwin"].includes(process.platform)) {
+    return {
+      key: "automatic-startup",
+      label: "Automatic startup",
+      status: "warning",
+      message: "Automatic startup is not supported on this operating system",
+    };
+  }
+
+  try {
+    const current = app.getLoginItemSettings({
+      path: process.execPath,
+      args: [HIDDEN_LAUNCH_ARGUMENT],
+    });
+    const enabled = current.openAtLogin && current.enabled !== false;
+
+    return {
+      key: "automatic-startup",
+      label: "Automatic startup",
+      status: enabled ? "ok" : "warning",
+      message: enabled
+        ? "Starts hidden in the system tray when the user signs in"
+        : "Disabled by the operating system or user; enable Printing Service in Startup Apps",
+    };
+  } catch (error) {
+    return {
+      key: "automatic-startup",
+      label: "Automatic startup",
+      status: "warning",
+      message: "Could not verify automatic startup",
+    };
+  }
+}
 
 function createMenu() {
   const template = [
@@ -2419,7 +2573,7 @@ const helper = {
   },
 };
 
-function createWindow() {
+function createWindow({ startHidden = false } = {}) {
   const iconPath = getIconPath();
 
   mainWindow = new BrowserWindow({
@@ -2475,8 +2629,11 @@ function createWindow() {
   );
 
   mainWindow.once("ready-to-show", () => {
-    mainWindow.show();
-    mainWindow.focus();
+    // Do not undo a background startup after the renderer has loaded.
+    if (!startHidden) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
   });
 
   mainWindow.on("close", (event) => {
@@ -2532,16 +2689,11 @@ app.on("ready", () => {
       app.dock?.setIcon?.(icon);
     }
 
+    configureAutoLaunch();
     initializeDatabase();
-    createWindow();
+    createWindow({ startHidden: isHiddenLaunch() });
     createMenu();
     createTray();
-
-    const shouldShowWindow = !process.argv.includes("--hidden");
-
-    if (!shouldShowWindow) {
-      mainWindow.hide();
-    }
   } catch (error) {
     console.error("Error during app initialization:", error);
     app.quit();
@@ -2592,11 +2744,15 @@ if (!gotTheLock) {
   app.quit();
 } else {
   // Handle second instance
-  app.on("second-instance", (event, commandLine, workingDirectory) => {
-    // Someone tried to run a second instance, we should focus our window instead
+  app.on("second-instance", (event, commandLine) => {
+    // A normal user launch should reveal the existing window. A second automatic
+    // startup launch stays in the tray, preventing it from stealing focus.
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
+      if (!isHiddenLaunch(commandLine)) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
     }
   });
 }
