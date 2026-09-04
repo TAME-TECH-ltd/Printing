@@ -468,15 +468,24 @@ function recoverInterruptedPrintJobs() {
   if (!db) return;
 
   const now = nowIsoString();
+  // Older versions persisted execute-timeout jobs as uncertain and required an
+  // operator to press Retry. Treat those existing jobs exactly like an
+  // interrupted in-flight job after the service restarts.
   const result = db
     .prepare(
       `
       UPDATE print_jobs
       SET status = ?, locked_at = NULL, next_retry_at = COALESCE(next_retry_at, ?), updated_at = ?
-      WHERE status = ?
+      WHERE status IN (?, ?)
     `,
     )
-    .run(PRINT_JOB_STATUS.PENDING, now, now, PRINT_JOB_STATUS.PROCESSING);
+    .run(
+      PRINT_JOB_STATUS.PENDING,
+      now,
+      now,
+      PRINT_JOB_STATUS.PROCESSING,
+      PRINT_JOB_STATUS.UNCERTAIN,
+    );
 
   recoveredInterruptedJobsCount = Number(result?.changes || 0);
 }
@@ -1439,7 +1448,7 @@ function markPrintJobCompleted(jobId, durationMs = null) {
   ).run(PRINT_JOB_STATUS.COMPLETED, now, durationMs, now, jobId);
 }
 
-function markPrintJobForRetry(job, error) {
+function markPrintJobForRetry(job, error, { mayHaveStarted = false } = {}) {
   const now = nowIsoString();
   const attempts = Number(job?.attempts || 0) + 1;
   const retryDelayMs = computeRetryDelayMs(attempts);
@@ -1457,7 +1466,9 @@ function markPrintJobForRetry(job, error) {
   if (attempts === 1 || attempts % 5 === 0) {
     const printerName = getPrinterDisplayName(job?.printer_key);
     mainWindow?.webContents.send("print-error", {
-      message: `Print failed. Retrying in ${Math.round(retryDelayMs / 1000)}s.`,
+      message: mayHaveStarted
+        ? `Printer response was interrupted. Retrying in ${Math.round(retryDelayMs / 1000)}s.`
+        : `Print failed. Retrying in ${Math.round(retryDelayMs / 1000)}s.`,
       error: message,
       attempts,
       roundId: job?.round_id || null,
@@ -1468,28 +1479,6 @@ function markPrintJobForRetry(job, error) {
   }
 
   return retryDelayMs;
-}
-
-function markPrintJobUncertain(job, error) {
-  const now = nowIsoString();
-  const message = truncateErrorMessage(error);
-
-  db.prepare(
-    `
-      UPDATE print_jobs
-      SET status = ?, last_error = ?, locked_at = NULL, updated_at = ?
-      WHERE id = ?
-    `,
-  ).run(PRINT_JOB_STATUS.UNCERTAIN, message, now, job.id);
-
-  mainWindow?.webContents.send("print-error", {
-    message:
-      "Printer result is unknown; automatic retry was stopped to prevent a duplicate ticket. Review the job and retry manually only if it did not print.",
-    error: message,
-    attempts: Number(job?.attempts || 0) + 1,
-    roundId: job?.round_id || null,
-    printerName: getPrinterDisplayName(job?.printer_key),
-  });
 }
 
 function getRetryDelayUntil(nextRetryAt) {
@@ -1589,17 +1578,25 @@ async function processPrintQueue(printerKey) {
   } catch (error) {
     console.error("Print job failed:", error);
     if (error?.printMayHaveStarted) {
-      markPrintJobUncertain(job, error);
+      // A timeout during execute can mean the ticket reached the printer even
+      // though its response was lost. The former behaviour parked this job in
+      // UNCERTAIN forever, which also stopped this worker from polling for the
+      // next round. Requeue it with backoff so the unattended docked service
+      // keeps recovering exactly as an operator's Retry action used to do.
+      const retryDelayMs = markPrintJobForRetry(job, error, {
+        mayHaveStarted: true,
+      });
       insertPrintLog({
         printer_id: job.printer_id,
         printer_key: printerKey,
         round_id: job.round_id,
         job_id: job.id,
-        event_type: "uncertain",
+        event_type: "uncertain-retry",
         status: "warning",
-        message: truncateErrorMessage(error),
+        message: `Printer response was uncertain; retrying automatically in ${Math.round(retryDelayMs / 1000)}s: ${truncateErrorMessage(error)}`,
       });
       sendDashboardUpdate();
+      schedulePrintQueue(printerKey, retryDelayMs);
       return;
     }
 
@@ -1626,16 +1623,19 @@ function formatEbmReceiptAmount(value) {
 }
 
 function formatEbmReceiptDateTime(value) {
-  const timestamp = toPrintableString(value).trim();
+  const rawValue = toPrintableString(value).trim();
+  // Match the inventory receipt preview: VSDC timestamps are UTC and all
+  // receipt dates are rendered in Kigali time.
+  const normalizedValue = /^\d{14}$/.test(rawValue)
+    ? `${rawValue.slice(0, 4)}-${rawValue.slice(4, 6)}-${rawValue.slice(6, 8)}T${rawValue.slice(8, 10)}:${rawValue.slice(10, 12)}:${rawValue.slice(12, 14)}Z`
+    : rawValue;
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalizedValue);
+  const date = new Date(
+    hasTimezone
+      ? normalizedValue
+      : `${normalizedValue.replace(" ", "T")}Z`,
+  );
 
-  if (/^\d{14}$/.test(timestamp)) {
-    return {
-      date: `${timestamp.slice(6, 8)}/${timestamp.slice(4, 6)}/${timestamp.slice(0, 4)}`,
-      time: `${timestamp.slice(8, 10)}:${timestamp.slice(10, 12)}:${timestamp.slice(12, 14)}`,
-    };
-  }
-
-  const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) {
     return { date: "--", time: "--" };
   }
@@ -1648,7 +1648,7 @@ function formatEbmReceiptDateTime(value) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hour12: false,
+    hourCycle: "h23",
   }).formatToParts(date);
   const valueFor = (type) =>
     parts.find((part) => part.type === type)?.value || "--";
@@ -1659,23 +1659,56 @@ function formatEbmReceiptDateTime(value) {
   };
 }
 
+function formatLocalInvoiceDateTime(value) {
+  const rawValue = toPrintableString(value).trim();
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(rawValue);
+  const localDateTime = rawValue.match(
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$/,
+  );
+
+  // Laravel's created_at value is already the tenant's local wall-clock time.
+  // Preserve it as written; treating it as UTC shifts a 13:00 invoice to 15:00
+  // in Kigali. Timestamped values still use the RRA formatter below.
+  if (localDateTime && !hasTimezone) {
+    const [, year, month, day, hour, minute, second] = localDateTime;
+    return {
+      date: `${day}/${month}/${year}`,
+      time: `${hour}:${minute}:${second}`,
+    };
+  }
+
+  return formatEbmReceiptDateTime(rawValue);
+}
+
 function buildEbmReceiptQrData(invoiceMeta = {}) {
   const publishedAt = toPrintableString(invoiceMeta?.vsdcRcptPbctDate).trim();
-  const fields = [
-    invoiceMeta?.sdcId,
-    invoiceMeta?.rcptNo,
-    invoiceMeta?.intrlData,
-    invoiceMeta?.rcptSign,
-  ].map((field) => toPrintableString(field).trim());
+  const sdcId = toPrintableString(invoiceMeta?.sdcId).trim();
+  const receiptNumber = toPrintableString(invoiceMeta?.rcptNo).trim();
+  const internalData = toPrintableString(invoiceMeta?.intrlData).trim();
+  const receiptSignature = toPrintableString(invoiceMeta?.rcptSign).trim();
 
-  if (!/^\d{14}$/.test(publishedAt) || fields.some((field) => !field)) {
+  if (
+    !/^\d{14}$/.test(publishedAt) ||
+    !sdcId ||
+    !receiptNumber ||
+    !internalData ||
+    !receiptSignature
+  ) {
+    return null;
+  }
+
+  const receiptDateTime = formatEbmReceiptDateTime(publishedAt);
+  if (receiptDateTime.date === "--" || receiptDateTime.time === "--") {
     return null;
   }
 
   return [
-    `${publishedAt.slice(6, 8)}${publishedAt.slice(4, 6)}${publishedAt.slice(0, 4)}`,
-    publishedAt.slice(8, 14),
-    ...fields,
+    receiptDateTime.date.replaceAll("/", ""),
+    receiptDateTime.time.replaceAll(":", ""),
+    sdcId,
+    `${receiptNumber}/${receiptNumber}`,
+    internalData,
+    receiptSignature,
   ].join("#");
 }
 
@@ -1761,9 +1794,7 @@ async function printNormalSaleEbmInvoice(printer, data, helpers) {
   const { order = {}, settings = {}, items = [], supportsQr } = data;
   const { println, tableCustom } = helpers;
   const invoiceMeta = order?.ebm_meta || {};
-  const invoiceDateTime = formatEbmReceiptDateTime(
-    order?.ebm_created_at || order?.order_time || order?.system_date,
-  );
+  const invoiceDateTime = formatLocalInvoiceDateTime(order?.ebm_created_at);
   const receiptDateTime = formatEbmReceiptDateTime(
     invoiceMeta?.vsdcRcptPbctDate,
   );
@@ -1810,7 +1841,14 @@ async function printNormalSaleEbmInvoice(printer, data, helpers) {
   if (toPrintableString(settings?.top_message).trim()) {
     println(settings?.top_message);
   }
-  println(`Client ID: ${toPrintableString(order?.client_reference, "--")}`);
+  println(`Name: ${toPrintableString(order?.client, "Walk-In Customer")}`);
+  println(`TIN: ${toPrintableString(order?.client_tin_number)}`);
+  const customerPhone = toPrintableString(
+    order?.client_phone || order?.customer_phone,
+  );
+  if (customerPhone.trim()) {
+    println(`Phone: ${customerPhone}`);
+  }
   printer.drawLine();
 
   printer.alignLeft();
@@ -1865,7 +1903,9 @@ async function printNormalSaleEbmInvoice(printer, data, helpers) {
   ]);
   printer.alignLeft();
   println(`SDC ID: ${toPrintableString(invoiceMeta?.sdcId)}`);
-  println(`RECEIPT NUMBER: ${toPrintableString(invoiceMeta?.rcptNo)} NS`);
+  println(
+    `RECEIPT NUMBER: ${toPrintableString(invoiceMeta?.rcptNo)}/${toPrintableString(invoiceMeta?.rcptNo)} NS`,
+  );
   println(`Internal Data: ${toPrintableString(invoiceMeta?.intrlData)}`);
   println(`Receipt Signature: ${toPrintableString(invoiceMeta?.rcptSign)}`);
   printer.drawLine();
@@ -1887,7 +1927,7 @@ async function printNormalSaleEbmInvoice(printer, data, helpers) {
     { text: `Date: ${receiptDateTime.date}`, align: "LEFT", width: 0.5 },
     { text: `Time: ${receiptDateTime.time}`, align: "RIGHT", width: 0.5 },
   ]);
-  println(`MRC: ${toPrintableString(invoiceMeta?.mrcNo)}`);
+  println(`MRC: ${toPrintableString(order?.mrc)}`);
   printer.drawLine();
   printer.alignCenter();
   if (toPrintableString(settings?.bottom_message).trim()) {
@@ -1938,6 +1978,9 @@ async function performPrintJob(data) {
 
   const isNormalSaleEbmInvoice =
     roundCategory === "INVOICE" &&
+    // The backend explicitly marks the EBM-service round. A regular invoice
+    // can be fetched after EBM metadata exists but must remain standard.
+    toPrintableString(data?.round?.print_mode).toUpperCase() === "EBM" &&
     Boolean(order?.ebm_meta) &&
     toPrintableString(order?.ebm_invoice_type).toUpperCase() === "NS";
 
@@ -1999,8 +2042,9 @@ async function performPrintJob(data) {
   printer.drawLine();
   printer.alignLeft();
 
-  const isReceipt =
-    Boolean(order?.ebm_meta) || data?.round?.origin === "RETAIL";
+  // Dedicated EBM rounds return above. A standard invoice can be fetched after
+  // EBM metadata is saved, so metadata alone must not turn it into a receipt.
+  const isReceipt = data?.round?.origin === "RETAIL";
   if (data?.testMode || roundCategory === "TEST") {
     println("TEST PRINT");
     println(`Printer: ${toPrintableString(data?.printer, "Unknown")}`);
@@ -2100,70 +2144,24 @@ async function performPrintJob(data) {
   printer.drawLine();
 
   if (roundCategory === "INVOICE") {
-    if (order?.ebm_meta) {
-      const totals = [
-        ["Total Rwf", `${order?.grand_total}`],
-        ["Total A-EX Rwf", `0.00`],
-        ["Total B-18% Rwf", `${order?.total_taxes}`],
-        ["Total D", `0.00`],
-        ["Total Tax Rwf", `${order?.total_taxes}`],
-      ];
-
-      totals.forEach((item) => {
-        tableCustom([
-          { text: item[0], align: "LEFT" },
-          { text: item[1], align: "RIGHT" },
-        ]);
-      });
-
-      printer.drawLine();
-      const invoiceMeta = order?.ebm_meta;
-      printer.newLine();
-      printer.bold(true);
-      print("SDC INFORMATION");
-      printer.bold(false);
-      printer.newLine();
-      printer.setTextNormal();
-      printer.drawLine();
-      println(`Date: ${helper.formateEbmDate(invoiceMeta.vsdcRcptPbctDate)}`);
-      println(`SDC ID: ${toPrintableString(invoiceMeta.sdcId)}`);
-      println(`Internal Data: ${toPrintableString(invoiceMeta.intrlData)}`);
-      println(`Receipt Signature: ${toPrintableString(invoiceMeta.rcptSign)}`);
-      println(`MRC: ${toPrintableString(invoiceMeta.mrcNo)}`);
-      printer.newLine();
-      if (supportsQr && toPrintableString(invoiceMeta.rcptSign).trim()) {
-        printer.alignCenter();
-        printer.printQR(
-          `https://myrra.rra.gov.rw/common/link/ebm/receipt/indexEbmReceiptData?Data=${invoiceMeta.rcptSign}`,
-          {
-            cellSize: 3,
-            correction: "Q",
-          },
-        );
-      } else {
-        println(`QR: ${toPrintableString(invoiceMeta.rcptSign)}`);
-      }
-      println(`Powered by EBM v2.1`);
-    } else {
-      printer.alignRight();
-      printer.setTextDoubleWidth();
-      println(`Total: ${helper.formatMoney(order?.grand_total)}`);
-      printer.setTextNormal();
-      printer.drawLine();
-      printer.alignCenter();
-      print(`Dial `);
-      printer.bold(true);
-      printer.setTextQuadArea();
-      printer.setTypeFontB();
-      print(settings?.momo_code);
-      printer.bold(false);
-      printer.setTextNormal();
-      printer.setTypeFontA();
-      print(` to pay with MOMO`);
-      printer.newLine();
-      println(`This is not a legal receipt. Please ask your legal receipt.`);
-      println(`Thank you!`);
-    }
+    printer.alignRight();
+    printer.setTextDoubleWidth();
+    println(`Total: ${helper.formatMoney(order?.grand_total)}`);
+    printer.setTextNormal();
+    printer.drawLine();
+    printer.alignCenter();
+    print(`Dial `);
+    printer.bold(true);
+    printer.setTextQuadArea();
+    printer.setTypeFontB();
+    print(settings?.momo_code);
+    printer.bold(false);
+    printer.setTextNormal();
+    printer.setTypeFontA();
+    print(` to pay with MOMO`);
+    printer.newLine();
+    println(`This is not a legal receipt. Please ask your legal receipt.`);
+    println(`Thank you!`);
   } else if (roundCategory === "ROUND_SLIP") {
     const total = items.reduce((a, b) => a + Number(b?.amount || 0), 0);
     printer.alignRight();
@@ -2546,29 +2544,6 @@ const helper = {
     } catch (error) {
       console.error("Form data generation error:", error);
       return new FormData();
-    }
-  },
-
-  formateEbmDate(timestamp) {
-    try {
-      if (
-        !timestamp ||
-        typeof timestamp !== "string" ||
-        timestamp.length < 14
-      ) {
-        return "Invalid Date";
-      }
-      const year = timestamp.substring(0, 4);
-      const month = timestamp.substring(4, 6);
-      const day = timestamp.substring(6, 8);
-      const hour = timestamp.substring(8, 10);
-      const minute = timestamp.substring(10, 12);
-      const second = timestamp.substring(12, 14);
-      const formattedDate = `${day}/${month}/${year} ${hour}:${minute}:${second}`;
-      return formattedDate;
-    } catch (error) {
-      console.error("EBM date formatting error:", error);
-      return "Invalid Date";
     }
   },
 };
